@@ -430,3 +430,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 The complete list of contributors can be found at:
 - https://github.com/garycourt/uri-js/graphs/contributors
 ```
+
+## iCTRL reference client
+
+`server/vendor/ictrl_rpc.py` is the unmodified reference client from [OpenMinis/iCTRL at c1e4268](https://github.com/OpenMinis/iCTRL/blob/c1e4268859ba858d1579f7b846a56cb40641b7f6/Scripts/ictrl_rpc.py), licensed under Apache-2.0. The accompanying license and notice are included in `server/vendor/iCTRL-LICENSE` and `server/vendor/iCTRL-NOTICE.md`. The Runner is installed separately.

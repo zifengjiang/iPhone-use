@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from wda_client import WDAClient, WDAError
+from ictrl_backend import IctrlClient, IctrlController, MCP_TOOLS, unsupported
 from wda_controller import CALL_BUDGET, PhoneController, TYPING_FREQUENCY
 from wda_setup import SetupManager, state_directory
 from wda_apps import AppCatalog
@@ -256,22 +257,33 @@ def setting(name,default,low,high):
 
 class Runtime:
     def __init__(self,state_dir=None,base_url=None):
-        root=state_directory(state_dir)
+        self.backend=os.environ.get("IPHONE_USE_BACKEND","wda")
+        if self.backend not in ("wda","ictrl"):
+            raise ValueError("IPHONE_USE_BACKEND must be wda or ictrl.")
+        root=(state_dir or Path.home()/".local/share/iphone-use-ictrl") if self.backend=="ictrl" else state_directory(state_dir)
         self.state_dir=Path(root).expanduser().resolve();self.state_dir.mkdir(mode=0o700,parents=True,exist_ok=True);self.state_dir.chmod(0o700)
-        # Configuration is private runtime data, never a project file.
-        configured_url=None
-        config=self.state_dir/"config.json"
-        if config.is_file():
-            try:configured_url="http://127.0.0.1:"+str(json.loads(config.read_text()).get("local_port",18100))
-            except (ValueError,OSError):pass
-        self.base_url=base_url or os.environ.get("WDA_URL") or configured_url or "http://127.0.0.1:18100"
-        self.client=WDAClient(self.base_url)
-        self.phone=PhoneController(self.client,self.state_dir)
-        self.setup_manager=SetupManager(self.state_dir,self.base_url)
-        self.apps=AppCatalog(self.state_dir,self.setup_manager)
-        self.screen=ScreenHub(self.state_dir)
-        self.phone.screen=self.screen
-        self.phone.settle_seconds=setting("WDA_SETTLE_SECONDS",SETTLE_SECONDS,0,2)
+        if self.backend=="ictrl":
+            if base_url is not None:
+                raise ValueError("The iCTRL backend discovers its endpoint; --url is for WDA.")
+            self.base_url=None
+            self.client=IctrlClient(os.environ.get("IPHONE_USE_ICTRL_DEVICE_ID"))
+            self.phone=IctrlController(self.client,self.state_dir)
+            self.screen=None
+        else:
+            # Configuration is private runtime data, never a project file.
+            configured_url=None
+            config=self.state_dir/"config.json"
+            if config.is_file():
+                try:configured_url="http://127.0.0.1:"+str(json.loads(config.read_text()).get("local_port",18100))
+                except (ValueError,OSError):pass
+            self.base_url=base_url or os.environ.get("WDA_URL") or configured_url or "http://127.0.0.1:18100"
+            self.client=WDAClient(self.base_url)
+            self.phone=PhoneController(self.client,self.state_dir)
+            self.setup_manager=SetupManager(self.state_dir,self.base_url)
+            self.apps=AppCatalog(self.state_dir,self.setup_manager)
+            self.screen=ScreenHub(self.state_dir)
+            self.phone.screen=self.screen
+        self.phone.settle_seconds=0 if self.backend=="ictrl" else setting("WDA_SETTLE_SECONDS",SETTLE_SECONDS,0,2)
         self.phone.call_budget=setting("WDA_CALL_BUDGET_SECONDS",CALL_BUDGET,5,240)
         self.phone.typing_frequency=int(setting("WDA_TYPING_FREQUENCY",TYPING_FREQUENCY,5,120))
         # One entry per model-facing response: size, and the idle gap before its request.
@@ -284,6 +296,8 @@ class Runtime:
         # sharing this runtime, and share only this plugin's session identity.
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         validate(args,SCHEMAS[name[4:]]);validate_semantics(name[4:],args)
+        if getattr(self,"backend","wda")=="ictrl" and name not in MCP_TOOLS:
+            unsupported("This tool is unavailable in the iCTRL pilot. Use pua_observe for screenshots.")
         if name in ("pua_screen","pua_screen_frame","pua_screen_action"):self.identify_device()
         # Cached preview polling does not share the PUA action/session lock.
         if name=="pua_screen_frame":return self.screen.frame(**args)
@@ -467,6 +481,7 @@ class Runtime:
     def _call(self,name,args):
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         op=name[4:];validate(args,SCHEMAS[op]);validate_semantics(op,args)
+        if getattr(self,"backend","wda")=="ictrl":return self.phone.run(op,args)
         start=time.monotonic();error=None;activity=None
         try:
             if op not in ("doctor","apps","setup","metrics"):
@@ -548,7 +563,9 @@ class Runtime:
 
     def replied(self):self._replied_at=time.monotonic()
 
-    def close(self):self.screen.close();self.client.close()
+    def close(self):
+        if self.screen is not None:self.screen.close()
+        self.client.close()
 
 
 def result_content(data,structured=False):
@@ -575,7 +592,7 @@ def tool_result(runtime,params):
         # The preview App reads structuredContent; frames never become model text.
         if name=="pua_screen_frame":return {"content":[],"structuredContent":data,"isError":False}
         result=result_content(data,structured=name in ("pua_screen","pua_screen_action"))
-        if name in ("pua_ready","pua_screen"):
+        if name in ("pua_ready","pua_screen") and getattr(runtime,"backend","wda")!="ictrl":
             result["_meta"]={"openai/widgetSessionId":SCREEN_SESSION_ID}
         return result
     except WDAError as exc:return result_content({"error":exc.as_dict()},structured=name=="pua_screen_action")
@@ -602,6 +619,40 @@ INSTRUCTIONS=(
 )
 
 
+ICTRL_INSTRUCTIONS=(
+ "iPhone Use is using a pre-paired iCTRL Runner. Use pua_setup(action=discover) to list devices, "
+ "then configure the full device ID and use pua_ready. The Runner is started separately. "
+ "Use pua_observe(mode=both) for a screenshot and iCTRL's text source. Coordinates are iPhone points; "
+ "multiply image pixels by image.pixel_to_point. This pilot supports coordinate taps, swipes, Home and App launch. "
+ "No WDA selectors, typing or live screen widget. Never replay a timed-out action; observe fresh state first. "
+ "If the phone is locked or asks for authentication, wait for the user to complete it."
+)
+
+
+def ictrl_tool_catalog():
+    descriptions={
+        "pua_setup":"Discover nearby iCTRL devices or report the current configuration.",
+        "pua_doctor":"Report the iCTRL connection configuration and setup steps.",
+        "pua_ready":"Verify the paired iCTRL device, unlock state, foreground and viewport.",
+        "pua_observe":"Read iCTRL foreground text source, a screenshot, or both.",
+        "pua_tap":"Tap by iPhone point coordinates on the selected iCTRL device.",
+        "pua_swipe":"Swipe once on the selected iCTRL device.",
+        "pua_press_button":"Return to the Home screen through iCTRL.",
+        "pua_launch_app":"Activate an App by bundle ID through iCTRL.",
+        "pua_batch":"Run a short batch of supported iCTRL operations. Stops on errors.",
+    }
+    catalog=[]
+    for tool in TOOLS:
+        name=tool["name"]
+        if name not in MCP_TOOLS:continue
+        item={key:value for key,value in tool.items() if key!="_meta"}
+        item["description"]=descriptions[name]
+        if name=="pua_setup":
+            item["inputSchema"]=obj({"action":string(enum=["discover","status"])},("action",))
+        catalog.append(item)
+    return catalog
+
+
 def serve(runtime):
     """Read requests on this thread; run phone tools in order on one worker.
 
@@ -609,6 +660,8 @@ def serve(runtime):
     catalog here keeps the preview live and the host responsive while a long phone
     operation is still running. Phone tools stay strictly sequential.
     """
+    ictrl=getattr(runtime,"backend","wda")=="ictrl"
+    tools=ictrl_tool_catalog() if ictrl else TOOLS
     writing=threading.Lock()
     def send(response):
         line=json.dumps(response,ensure_ascii=False,allow_nan=False)
@@ -640,13 +693,13 @@ def serve(runtime):
                 method=request["method"]
                 if method=="initialize":
                     offered=params.get("protocolVersion")
-                    result={"protocolVersion":offered if offered in PROTOCOLS else PROTOCOLS[0],"capabilities":{"tools":{"listChanged":False},"resources":{"listChanged":False}},"serverInfo":{"name":"iphone-use","version":VERSION},"instructions":INSTRUCTIONS}
+                    result={"protocolVersion":offered if offered in PROTOCOLS else PROTOCOLS[0],"capabilities":{"tools":{"listChanged":False},"resources":{"listChanged":False}},"serverInfo":{"name":"iphone-use-ictrl" if ictrl else "iphone-use","version":VERSION},"instructions":ICTRL_INSTRUCTIONS if ictrl else INSTRUCTIONS}
                 elif method=="ping":result={}
-                elif method=="tools/list":result={"tools":TOOLS}
+                elif method=="tools/list":result={"tools":tools}
                 elif method=="resources/list":
-                    result={"resources":[{"uri":SCREEN_URI,"name":"iPhone Use Screen","title":"手机屏幕","mimeType":"text/html;profile=mcp-app","_meta":SCREEN_META}]}
+                    result={"resources":[] if ictrl else [{"uri":SCREEN_URI,"name":"iPhone Use Screen","title":"手机屏幕","mimeType":"text/html;profile=mcp-app","_meta":SCREEN_META}]}
                 elif method=="resources/read":
-                    if params.get("uri")!=SCREEN_URI:raise WDAError("invalid_argument","Unknown screen resource URI.")
+                    if ictrl or params.get("uri")!=SCREEN_URI:raise WDAError("invalid_argument","Unknown screen resource URI.")
                     html=(Path(__file__).resolve().parents[1]/"assets/phone-screen.html").read_text()
                     result={"contents":[{"uri":SCREEN_URI,"mimeType":"text/html;profile=mcp-app","text":html,"_meta":SCREEN_META}]}
                 elif method=="tools/call":

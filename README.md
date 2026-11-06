@@ -10,6 +10,37 @@ iPhone Use 使用 [WebDriverAgent](https://github.com/appium/WebDriverAgent)（W
 
 **使用前，需要先在你自己的 iPhone 上安装、签名并启动 WDA Runner。** WDA 是运行在手机上的执行服务；下面的提示词和 setup 流程可以让 Codex 协助完成首次安装，已有健康的 WDA 可直接复用。
 
+## iCTRL 无线试用
+
+该 fork 可以在 Mac 上使用已配对的 [iCTRL Runner](https://github.com/OpenMinis/iCTRL) 控制 iPhone。普通启动使用 WDA。只有设置 `IPHONE_USE_BACKEND=ictrl` 的进程才切换，使用独立状态目录 `~/.local/share/iphone-use-ictrl`。
+
+1. 在测试 iPhone 上按 iCTRL 上游说明签名并启动 Runner，允许本地网络，在 Runner 通知或 companion App 开启 Nearby Discovery。iCTRL 需要 Developer Mode 与已挂载的 Developer Disk Image；请在使用 iCTRL 前释放这台设备上的 WDA/XCTest 会话。
+2. 用以下命令查找设备，复制 `devices` 返回的完整 `device_id`。Mac 可以通过 AWDL 或 LAN 找到已广播的 Runner。
+
+   ```bash
+   IPHONE_USE_BACKEND=ictrl python3 scripts/phone.py pua_setup '{"action":"discover"}'
+   ```
+
+3. 首次连接用 iCTRL 客户端配对一次，在手机确认。此后 iPhone Use 按完整设备 ID 复用 `~/.ictrl/token.json` 中的密钥。保留文件权限 `0600`。
+
+   ```bash
+   python3 server/vendor/ictrl_rpc.py --nearby '<完整 device_id>' pair
+   export IPHONE_USE_BACKEND=ictrl
+   export IPHONE_USE_ICTRL_DEVICE_ID='<完整 device_id>'
+   python3 scripts/phone.py pua_ready '{"screenshot":true}'
+   ```
+
+4. 需要在 Codex 中试用时，将该副本单独注册。用实际 checkout 的绝对路径替换示例路径，`python3` 使用本机安装的解释器。
+
+   ```bash
+   codex mcp add iphone-use-ictrl \
+     --env IPHONE_USE_BACKEND=ictrl \
+     --env IPHONE_USE_ICTRL_DEVICE_ID='<完整 device_id>' \
+     -- python3 /absolute/path/to/iPhone-use/server/iphone_use.py
+   ```
+
+当前覆盖 READY、iCTRL 文本树和 PNG 截图、坐标点击、滑动、Home、启动或切换 App，以及上述操作的批处理。`pua_observe(mode="both")` 同时返回文本树和图片，坐标换算使用 `image.pixel_to_point`。文字输入、WDA 选择器、实时 widget 和跨主机接管租约尚未接入。Runner 的启动、停止和配对由 iCTRL 管理。动作超时后先观察当前页面再决定是否重试。
+
 ## 用一段提示词让 Codex 安装
 
 将下面这段话复制到本机 Codex：
