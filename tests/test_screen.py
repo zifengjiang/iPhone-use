@@ -287,7 +287,8 @@ class ScreenHubTests(unittest.TestCase):
 
     def test_stream_command_uses_existing_usb_dependencies_and_no_new_install(self):
         (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234", "password": "secret"}))
-        with patch("wda_screen.shutil.which", return_value="/usr/bin/node"):
+        with patch("wda_screen.shutil.which", return_value="/usr/bin/node"), \
+                patch.object(type(self.hub), "_coredevice_python", return_value=None):
             self.assertIsNone(self.hub._command())
             dependency = self.directory / "runtime/forward/node_modules/appium-ios-device"
             dependency.mkdir(parents=True)
@@ -297,7 +298,21 @@ class ScreenHubTests(unittest.TestCase):
             self.assertNotIn("secret", Path(command[1]).read_text())
             self.assertEqual(os.stat(command[1]).st_mode & 0o777, 0o600)
         (self.directory / "config.json").write_text('{"udid":"TEST-DEVICE-1234", "mjpeg_device_port":"http://remote"}')
-        self.assertIsNone(self.hub._command())
+        with patch.object(type(self.hub), "_coredevice_python", return_value=None):
+            self.assertIsNone(self.hub._command())
+
+
+    def test_stream_command_prefers_the_coredevice_helper(self):
+        (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234", "password": "secret"}))
+        with patch.object(type(self.hub), "_coredevice_python", return_value="/venv/bin/python"):
+            command = self.hub._command()
+        self.assertEqual(command[:2], ["/venv/bin/python", str(ROOT / "server" / "coredevice_helper.py")])
+        self.assertEqual(command[2:4], ["--stream", "--udid"])
+        self.assertEqual(command[4], "TEST-DEVICE-1234")
+        self.assertNotIn("secret", " ".join(command))
+        (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234", "stream_backend": "axe"}))
+        with patch.object(type(self.hub), "_coredevice_python", return_value="/venv/bin/python"):
+            self.assertNotEqual(["--stream"], (self.hub._command() or ["--stream"])[2:3])
 
 
 class NodeStreamTests(unittest.TestCase):
