@@ -631,9 +631,9 @@ class DeviceController:
         if not isinstance(allow_newlines, bool):
             fail("invalid_argument", "allow_newlines must be boolean.")
         bad = [character for character in text
-               if character not in "\n\t" and not 32 <= ord(character) < 127]
+               if character not in "\n\t" and (ord(character) < 32 or ord(character) == 127)]
         if bad:
-            fail("invalid_argument", "Typing covers printable ASCII, newline and tab. "
+            fail("invalid_argument", "Typing covers printable text in any script, newline and tab. "
                                      f"Unsupported: {''.join(sorted(set(bad)))[:20]!r}.")
         if not allow_newlines and ("\n" in text or "\r" in text):
             fail("invalid_argument", "Newlines submit or start a new line; pass allow_newlines=true to confirm.")

@@ -39,7 +39,7 @@ selector 只支持 `label`、`label_contains`、`name`、`value`、`type`、`ena
 
 - `pua_tap`：优先用 selector。同一位置叠了多个匹配（Cell 与其中文字）时工具自动取最内层；多个分开的匹配返回 `ambiguous_target`，按候选的 `tap` 坐标点击或加 `index`。selector 表达不了时传 `x`、`y`。坐标点击后如果页面没变，先取截图确认遮挡，不要原样重试。
 - `pua_swipe`：`direction` 是手指移动方向，`up` 通常看到下面的内容；可用 `region` 限定区域。只执行一次手势，是否移动看下一张截图。
-- `pua_type_text`：只支持可打印 ASCII 与 Tab、换行，单次最多 500 字符，更长内容分几次输入（焦点保持在输入框内时逐次追加）。先点中输入框，再不带 selector 调用。`allow_newlines=true` 只在确实需要多行时使用；含非 ASCII 字符会被拒绝，需要改用其他输入方式并告知用户。
+- `pua_type_text`：支持任意文字（含中文），单次最多 500 字符，更长内容分几次输入（焦点保持在输入框内时逐次追加）。先点中输入框，再不带 selector 调用。`allow_newlines=true` 只在确实需要多行时使用。非 ASCII 文字走设备剪贴板 + ⌘V 粘贴，会覆盖设备上原有的剪贴板内容。
 - `pua_press_button`：`home`、`volumeup`、`volumedown`。锁屏请用 `pua_unlock`。
 - `pua_launch_app(bundle_id)`：已知 bundle ID 直接传；不确定时用 `pua_apps(query=...)`，`installed_verified=true` 才是本机安装证据。
 - `expect` 只用于需要证明的关键一步：动作完成后工具轮询 AXe 树确认目标出现，否则在结果里返回 `postcondition_failed` 并附截图。普通步骤不要加。

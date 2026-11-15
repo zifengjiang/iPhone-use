@@ -106,7 +106,7 @@ SCHEMAS = {
         **EXPECT,
     }),
     "type_text": obj({
-        "text": string("Text for the focused field: printable ASCII, newline and tab.", max_length=500),
+        "text": string("Text for the focused field, in any script: newline and tab included.", max_length=500),
         "allow_newlines": {**BOOL, "description": "Required when text contains a newline."},
         "observe": OBS,
     }, ("text",)),
@@ -170,7 +170,7 @@ DESCRIPTIONS = {
             "expect to prove the result, observe to see it."),
     "swipe": ("Swipe once up, down, left or right inside an optional region. The gesture goes through CoreDevice "
               "HID; pass expect or observe when the new screen matters."),
-    "type_text": ("Type into the field that already has focus; tap the field first. Printable ASCII, newline and tab "
+    "type_text": ("Type into the field that already has focus; tap the field first. Any script, newline and tab "
                   "only, up to 500 characters. CoreDevice cannot clear a field or read it back, so verify the result "
                   "with pua_observe."),
     "press_button": ("Press Home, volume up or volume down through CoreDevice. Locking the phone is deliberately not "
@@ -675,7 +675,7 @@ Work loop
 - pua_tap {selector} taps an element. When several match, add type/value/index; when the tree is empty, \
 tap {x,y} points taken from the screenshot. Screenshot image pixels map to points with pixel_to_point.
 - pua_swipe once per call; pua_wait proves a selector appeared; pass expect on any mutation to verify.
-- pua_type_text writes into the focused field only: tap the field first. Printable ASCII plus newline \
+- pua_type_text writes into the focused field only: tap the field first. Any script plus newline \
 and tab, at most 500 characters.
 - pua_press_button and pua_launch_app go through CoreDevice; pua_unlock types the passcode only after \
 AXe proved the phone is locked.

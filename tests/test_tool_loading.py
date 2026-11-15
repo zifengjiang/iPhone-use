@@ -61,11 +61,11 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("pua_doctor", INSTRUCTIONS)
         self.assertIn("pua_observe", INSTRUCTIONS)
         self.assertIn("observation_id", INSTRUCTIONS)
-        self.assertIn("ASCII", INSTRUCTIONS)
+        self.assertIn("Any script", INSTRUCTIONS)
         self.assertIn("pua_unlock", INSTRUCTIONS)
 
     def test_descriptions_state_the_constraints_the_code_enforces(self):
-        self.assertIn("ASCII", DESCRIPTIONS["type_text"])
+        self.assertIn("Any script", DESCRIPTIONS["type_text"])
         self.assertIn("500", DESCRIPTIONS["type_text"])
         self.assertIn("selector", DESCRIPTIONS["tap"])
         self.assertIn("locked", DESCRIPTIONS["unlock"])

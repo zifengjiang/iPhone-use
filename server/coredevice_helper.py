@@ -253,8 +253,25 @@ class Device:
             self.keyboard_id = await service.create_keyboard_service()
         return service, self.keyboard_id
 
+    async def paste(self, text):
+        """Write ``text`` through the device pasteboard: HID reports carry ASCII only."""
+        from pymobiledevice3.remote.core_device.hid_service import KEY_LEFT_GUI, KEY_V
+        from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
+        async with PasteboardService(await self.tunnel()) as service:
+            await service.set_text(text)
+        hid, keyboard = await self.keyboard()
+        await hid.send_keyboard(keyboard, (KEY_LEFT_GUI,))
+        await asyncio.sleep(0.1)
+        await hid.send_keyboard(keyboard, (KEY_LEFT_GUI, KEY_V))
+        await asyncio.sleep(0.2)
+        await hid.send_keyboard(keyboard, ())
+        self.last_hid_use = time.monotonic()
+
     async def write(self, text, char_delay=0.04):
         from pymobiledevice3.remote.core_device.hid_service import ASCII_TO_HID, KEY_LEFT_SHIFT
+        if any(char not in ASCII_TO_HID for char in text):
+            await self.paste(text)
+            return
         service, keyboard = await self.keyboard()
         await service.send_keyboard(keyboard, ())  # a bare report settles dtuhidd before the first key
         await asyncio.sleep(max(char_delay, 0.2))

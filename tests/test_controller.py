@@ -245,10 +245,14 @@ class TypeTests(ControllerTestCase):
         self.assertEqual(error.code, "invalid_argument")
         self.phone.type_text("a\nb", allow_newlines=True)
 
-    def test_non_ascii_is_rejected_before_touching_the_phone(self):
-        error = self.error(self.phone.type_text, "你好")
+    def test_non_ascii_text_goes_to_the_helper(self):
+        result = self.phone.type_text("换电柜扫码")
+        self.assertEqual(result["typed"], 5)
+        self.assertIn(("type", {"text": "换电柜扫码"}), self.core.calls)
+
+    def test_control_characters_are_rejected_before_touching_the_phone(self):
+        error = self.error(self.phone.type_text, "a\x07b")
         self.assertEqual(error.code, "invalid_argument")
-        self.assertIn("ASCII", error.message)
         self.assertEqual([call for call in self.core.calls if call[0] == "type"], [])
 
     def test_carriage_returns_are_rejected(self):
