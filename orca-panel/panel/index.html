@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>iPhone</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--fg:#14202b;--muted:#6b7785;--line:#dde3ea;--live:#11986b}
+@media (prefers-color-scheme:dark){:root{--bg:#161a1f;--fg:#e7edf3;--muted:#8b98a6;--line:#2b333c;--live:#42ce91}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;flex-direction:column;height:100vh}
+header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:600}
+header .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+header .dot.live{background:var(--live)}
+header .meta{margin-left:auto;font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
+main{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px}
+img{max-width:100%;max-height:100%;object-fit:contain;border-radius:10px;touch-action:none;user-select:none;
+    box-shadow:0 1px 2px rgba(15,25,35,.14),0 12px 32px -12px rgba(15,25,35,.3);background:#000}
+footer{display:flex;gap:6px;padding:8px 10px;border-top:1px solid var(--line)}
+button{font:inherit;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--muted)}
+#empty{color:var(--muted);max-width:280px;text-align:center;line-height:1.6}
+</style></head>
+<body>
+<header><span class="dot" id="dot"></span><span>iPhone</span><span class="meta" id="meta">连接中…</span></header>
+<main><img id="frame" alt="" hidden><div id="empty">正在从 USB iPhone 取画面…</div></main>
+<footer>
+  <button id="home">主屏</button><button id="lock">锁屏</button><button id="retry">重连</button>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id)
+const img = $('frame'), dot = $('dot'), meta = $('meta'), empty = $('empty')
+let sequence = 0, size = { width: 402, height: 874 }, failures = 0, pressed = null
+
+async function request(name, args) {
+  const value = await orca.plugin.request(name, args)
+  if (value && value.ok === false) throw Object.assign(new Error(value.error?.message || 'failed'), { code: value.error?.code })
+  return value
+}
+
+function paint(size) {
+  if (size.width && size.height) size = size
+}
+
+async function loop() {
+  try {
+    const reply = await request('frame', { after: sequence, timeout: 2500 })
+    if (reply.sequence > sequence) { sequence = reply.sequence; failures = 0 }
+    if (reply.jpeg) {
+      img.src = 'data:image/jpeg;base64,' + reply.jpeg
+      img.hidden = false; empty.hidden = true; dot.classList.add('live')
+    }
+    if (reply.width) { size = { width: reply.width, height: reply.height } }
+    if (reply.error) { empty.textContent = reply.error; empty.hidden = false }
+    meta.textContent = reply.waiting ? '等待首帧…' : `Live · ${sequence} 帧`
+  } catch {
+    failures += 1
+    dot.classList.remove('live')
+    meta.textContent = failures > 3 ? '取流失败' : '重试中…'
+    await new Promise((r) => setTimeout(r, Math.min(4000, 400 * failures)))
+  }
+  setTimeout(loop, 60)
+}
+
+img.addEventListener('pointerdown', (event) => {
+  const rect = img.getBoundingClientRect()
+  pressed = { x: (event.clientX - rect.left) / rect.width * size.width, y: (event.clientY - rect.top) / rect.height * size.height }
+})
+img.addEventListener('pointerup', (event) => {
+  if (!pressed) return
+  const rect = img.getBoundingClientRect()
+  const to = { x: (event.clientX - rect.left) / rect.width * size.width, y: (event.clientY - rect.top) / rect.height * size.height }
+  const moved = Math.hypot(to.x - pressed.x, to.y - pressed.y)
+  const call = moved > 12
+    ? request('swipe', { fromX: pressed.x, fromY: pressed.y, toX: to.x, toY: to.y })
+    : request('tap', { x: pressed.x, y: pressed.y })
+  call.catch(() => {})
+  pressed = null
+})
+
+$('home').onclick = () => request('button', { name: 'home' }).catch(() => {})
+$('lock').onclick = () => request('button', { name: 'lock' }).catch(() => {})
+$('retry').onclick = () => { sequence = 0; failures = 0; img.hidden = true; empty.hidden = false; empty.textContent = '重新连接中…' }
+
+request('size').then((info) => { if (info.width) size = { width: info.width, height: info.height } }).catch(() => {})
+loop()
+</script>
+</body></html>

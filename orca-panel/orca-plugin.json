@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 2,
+  "id": "iphone-use-screen",
+  "name": "iPhone Screen",
+  "description": "Live screen of the USB iPhone, with tap and swipe straight from the panel.",
+  "version": "0.1.0",
+  "engines": { "orca": ">=1.4.246" },
+  "execution": "trusted-worker",
+  "main": "src/worker.ts",
+  "capabilities": [],
+  "contributes": {
+    "panels": [
+      {
+        "id": "screen",
+        "title": "📱 iPhone",
+        "icon": "activity",
+        "entry": "panel/index.html"
+      }
+    ]
+  }
+}
