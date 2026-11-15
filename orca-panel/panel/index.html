@@ -5,13 +5,16 @@
 @media (prefers-color-scheme:dark){:root{--bg:#161a1f;--fg:#e7edf3;--muted:#8b98a6;--line:#2b333c;--live:#42ce91}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;flex-direction:column;height:100vh}
-header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:600}
-header .phone{position:relative;display:inline-flex;flex:none}
-header .phone svg{display:block}
-header .dot{position:absolute;right:-2px;bottom:-1px;width:7px;height:7px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 2px var(--bg)}
-header .dot.live{background:var(--live)}
-header .meta{margin-left:auto;font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
-main{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px}
+footer{display:flex;align-items:center;justify-content:center;gap:10px;padding:10px;border-top:1px solid var(--line);position:relative}
+footer .bar{display:flex;align-items:center;gap:6px}
+button.icon{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border-radius:9px;
+  border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
+button.icon:hover{border-color:var(--muted);background:color-mix(in srgb,var(--fg) 6%,transparent)}
+button.icon svg{width:16px;height:16px;display:block}
+footer .meta{position:absolute;right:12px;color:var(--muted);font-variant-numeric:tabular-nums;font-size:11px}
+footer .dot{position:absolute;left:12px;width:7px;height:7px;border-radius:50%;background:var(--muted)}
+footer .dot.live{background:var(--live)}
+main{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px 8px 4px}
 img{max-width:100%;max-height:100%;object-fit:contain;border-radius:10px;touch-action:none;user-select:none;
     box-shadow:0 1px 2px rgba(15,25,35,.14),0 12px 32px -12px rgba(15,25,35,.3);background:#000}
 footer{display:flex;gap:6px;padding:8px 10px;border-top:1px solid var(--line)}
@@ -20,10 +23,15 @@ button:hover{border-color:var(--muted)}
 #empty{color:var(--muted);max-width:280px;text-align:center;line-height:1.6}
 </style></head>
 <body>
-<header><span class="phone"><svg width="13" height="18" viewBox="0 0 13 18" fill="none" aria-hidden="true"><rect x="0.6" y="0.6" width="11.8" height="16.8" rx="2.6" stroke="currentColor" stroke-width="1.2"/><path d="M4.6 2.9h3.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg><span class="dot" id="dot"></span></span><span>iPhone</span><span class="meta" id="meta">连接中…</span></header>
 <main><img id="frame" alt="" hidden><div id="empty">正在从 USB iPhone 取画面…</div></main>
 <footer>
-  <button id="home">主屏</button><button id="lock">锁屏</button><button id="retry">重连</button>
+  <span class="dot" id="dot"></span>
+  <div class="bar">
+    <button class="icon" id="home" title="主屏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg></button>
+    <button class="icon" id="lock" title="锁屏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.6a4 4 0 0 1 8 0v2.9"/></svg></button>
+    <button class="icon" id="retry" title="重连"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v4.5h-4.5"/></svg></button>
+  </div>
+  <span class="meta" id="meta"></span>
 </footer>
 <script>
 const $ = (id) => document.getElementById(id)
@@ -51,7 +59,7 @@ async function loop() {
     }
     if (reply.width) { size = { width: reply.width, height: reply.height } }
     if (reply.error && img.hidden) { empty.textContent = reply.error; empty.hidden = false }
-    meta.textContent = reply.waiting ? '等待首帧…' : reply.idle ? `静止画面 · ${sequence}` : `Live · ${sequence} 帧`
+    meta.textContent = reply.waiting ? '…' : reply.idle ? '静止' : `${sequence} 帧`
   } catch {
     failures += 1
     dot.classList.remove('live')
