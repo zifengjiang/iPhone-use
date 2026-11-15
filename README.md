@@ -4,66 +4,38 @@
 
 ![iPhone Use 在 Codex 中操作真实 iPhone 并实时展示手机屏幕](assets/iphone-use-demo.png)
 
-让 Codex 通过 USB 操作你的真实 iPhone。用自然语言描述任务，Codex 就能打开 App、读取页面、点击、滚动、输入文字、整理列表，并在侧边栏展示手机屏幕。
+让 Codex 通过 USB 操作你的真实 iPhone。用自然语言描述任务，Codex 就能打开 App、读取页面、点击、滚动、输入文字，并在侧边栏展示手机屏幕。
 
-iPhone Use 使用 [WebDriverAgent](https://github.com/appium/WebDriverAgent)（WDA）与 iPhone 通信，包含本地 MCP 服务、安装与使用技能，以及实时屏幕 widget。它优先复用现有连接与构建；控件定位失败时，指导模型查看截图并尝试坐标点击。
+手机端不需要安装任何 runner，也不需要 Xcode 签名。iPhone Use 只使用本机两个通道：
 
-**使用前，需要先在你自己的 iPhone 上安装、签名并启动 WDA Runner。** WDA 是运行在手机上的执行服务；下面的提示词和 setup 流程可以让 Codex 协助完成首次安装，已有健康的 WDA 可直接复用。
+| 通道 | 负责 | 实现 |
+| --- | --- | --- |
+| CoreDevice | 截图、坐标点击、滑动、键盘输入、Home / 音量键、解锁、启动 App | 独立解释器里的 `pymobiledevice3`，通过 JSON-lines 子进程协议调用 |
+| AXe | 元素树、按选择器点击 | 本机 `axe` 二进制，走 CoreDevice 隧道读取辅助功能树 |
 
-## iCTRL 无线试用
+两者都只在本机运行，USB 通信由 `pymobiledevice3` 直接完成，没有端口转发、没有 HTTP 服务、没有手机端 App。控件定位失败时，工具会返回当前截图与坐标换算，模型据此改用坐标操作。
 
-该 fork 可以在 Mac 上使用已配对的 [iCTRL Runner](https://github.com/OpenMinis/iCTRL) 控制 iPhone。普通启动使用 WDA。只有设置 `IPHONE_USE_BACKEND=ictrl` 的进程才切换，使用独立状态目录 `~/.local/share/iphone-use-ictrl`。
+## 安装依赖
 
-1. 在测试 iPhone 上按 iCTRL 上游说明签名并启动 Runner，允许本地网络，在 Runner 通知或 companion App 开启 Nearby Discovery。iCTRL 需要 Developer Mode 与已挂载的 Developer Disk Image；请在使用 iCTRL 前释放这台设备上的 WDA/XCTest 会话。
-2. 用以下命令查找设备，复制 `devices` 返回的完整 `device_id`。Mac 可以通过 AWDL 或 LAN 找到已广播的 Runner。
+| 依赖 | 用途 |
+| --- | --- |
+| macOS 与 Codex 桌面端 / CLI | 安装本地插件、运行 MCP 服务与屏幕侧边栏 |
+| USB 连接的真实 iPhone | 信任此 Mac，开启开发者模式，使用时保持解锁 |
+| Python 3.9+ | 运行 MCP 服务；主进程只用标准库 |
+| CoreDevice 独立解释器（`pymobiledevice3` + `Pillow`） | 截图、HID 手势、键盘、按键、解锁与启动 App |
+| [AXe](https://github.com/cameroncooke/AXe) 二进制 | 元素树与按选择器点击 |
+| Node.js 20.19+、22.12+ 或 24+，npm 10+ | 仅在本地构建屏幕 widget 时需要 |
 
-   ```bash
-   IPHONE_USE_BACKEND=ictrl python3 scripts/phone.py pua_setup '{"action":"discover"}'
-   ```
+首次准备（两条命令即可，之后不再需要）：
 
-3. 首次连接用 iCTRL 客户端配对一次，在手机确认。此后 iPhone Use 按完整设备 ID 复用 `~/.ictrl/token.json` 中的密钥。保留文件权限 `0600`。
+```bash
+/opt/homebrew/bin/python3 -m venv ~/.local/share/iphone-use-coredevice/venv
+~/.local/share/iphone-use-coredevice/venv/bin/pip install pymobiledevice3 Pillow
 
-   ```bash
-   python3 server/vendor/ictrl_rpc.py --nearby '<完整 device_id>' pair
-   export IPHONE_USE_BACKEND=ictrl
-   export IPHONE_USE_ICTRL_DEVICE_ID='<完整 device_id>'
-   python3 scripts/phone.py pua_ready '{"screenshot":true}'
-   ```
+brew install cameroncooke/axe/axe   # 或从 AXe 仓库安装到 ~/.local/share/iphone-use-axe/axe
+```
 
-4. 需要在 Codex 中试用时，将该副本单独注册。用实际 checkout 的绝对路径替换示例路径，`python3` 使用本机安装的解释器。
-
-   ```bash
-   codex mcp add iphone-use-ictrl \
-     --env IPHONE_USE_BACKEND=ictrl \
-     --env IPHONE_USE_ICTRL_DEVICE_ID='<完整 device_id>' \
-     -- python3 /absolute/path/to/iPhone-use/server/iphone_use.py
-   ```
-
-当前覆盖 READY、iCTRL 文本树和截图、坐标点击、滑动、Home、启动或切换 App，以及上述操作的批处理。`pua_screen()` 打开 Codex 截图面板，点击刷新获取一帧当前画面。`pua_observe(mode="both")` 同时返回文本树和图片，坐标换算使用 `image.pixel_to_point`。Runner 的启动、停止和配对由 iCTRL 管理。动作超时后先观察当前页面再决定是否重试。
-
-## CoreDevice 混合后端
-
-`IPHONE_USE_BACKEND=hybrid` 让同一台进程同时使用 iCTRL 与 CoreDevice：图形交给 CoreDevice，文本树留在 iCTRL。适用于既想拿结构化页面、又需要锁屏状态下操作的场景。
-
-1. 安装独立解释器与依赖（CoreDevice 由另一个进程承载，主进程不需要 `pymobiledevice3`）：
-
-   ```bash
-   /opt/homebrew/bin/python3 -m venv ~/.local/share/iphone-use-coredevice/venv
-   ~/.local/share/iphone-use-coredevice/venv/bin/pip install pymobiledevice3 Pillow
-   ```
-
-2. 指定两台后端的目标：iCTRL 用完整 `device_id`，CoreDevice 用 `devicectl` 里的设备 UDID。
-
-   ```bash
-   export IPHONE_USE_BACKEND=hybrid
-   export IPHONE_USE_ICTRL_DEVICE_ID='<完整 device_id>'
-   export IPHONE_USE_COREDEVICE_UDID='00008150-0000000000000001'
-   export IPHONE_USE_UNLOCK_PASSCODE='<锁屏密码，可选>'
-   ```
-
-3. 验证：`pua_ready` 返回 `backend: "hybrid"` 与 `coredevice: true`；`pua_unlock` 在设备锁屏时用 CoreDevice 手势输入密码并返回 `locked: false`；`pua_lockstate` 报告锁态（CoreDevice 在 iOS 27.2.1 未实现该查询，返回 `null` 表示两边都答不了）。
-
-分工：截图、坐标点击、滑动、Home/音量键、打字、解锁走 CoreDevice（热身后点击 52ms，Runner 约 1.1s）；文本树、页面元素、启动 App 仍走 iCTRL。Runner 掉线时截图与坐标动作自动降级到 CoreDevice，`app` 字段退化为 `unknown`；CoreDevice 超时的动作不会在 iCTRL 上重放。锁屏、无 Runner 会话时也能操作，这是纯 iCTRL 后端做不到的。
+`pua_doctor` 会检查两者是否就位。默认路径是 `~/.local/share/iphone-use-coredevice/venv/bin/python` 与 `~/.local/share/iphone-use-axe/axe`，可用 `IPHONE_USE_COREDEVICE_PYTHON`、`IPHONE_USE_AXE` 覆盖。
 
 ## 用一段提示词让 Codex 安装
 
@@ -73,52 +45,24 @@ iPhone Use 使用 [WebDriverAgent](https://github.com/appium/WebDriverAgent)（W
 请帮我安装和配置 iPhone Use：
 https://github.com/zhongerxin/iPhone-use
 
-先读取仓库 README 和安装脚本，检查本机 Codex CLI、Python、Node.js、npm、
-完整 Xcode，以及通过 USB 连接的 iPhone。把项目放到合适的本机目录，
-运行 sh scripts/install.sh 安装插件。
+先读取仓库 README 和安装脚本，检查本机 Codex CLI、Python、Node.js、npm，
+以及通过 USB 连接的 iPhone。把项目放到合适的本机目录，运行 sh scripts/install.sh
+安装插件。
 
-如果当前聊天还没有加载新工具，明确告诉我重连或新开聊天后继续。
-工具可用后读取 iphone-use-setup 技能，检查现有配置，优先复用已有 WDA。
-首次配置时发现我的设备，使用我自己的 Apple 开发团队和可签名 bundle ID，
-获取固定版本 WDA、配置签名、构建并启动，直到 pua_ready 返回 ready=true，
-然后打开手机屏幕。不要照搬作者的设备标识或签名信息。
+创建 CoreDevice 助手用的解释器，安装 pymobiledevice3 与 Pillow，并确认 AXe
+二进制可用。如果当前聊天还没有加载新工具，明确告诉我重连或新开聊天后继续。
+工具可用后读取 iphone-use-setup 技能，运行 pua_setup 发现设备并配置 UDID，
+直到 pua_ready 返回 ready=true，然后打开手机屏幕。不要照搬作者的设备标识。
 
-缺少依赖时说明具体缺项并帮助安装。Apple 账号登录、设备信任、开发者模式
-或解锁需要我操作时，告诉我明确步骤，等我完成再继续。
+缺少依赖时说明具体缺项并帮助安装。设备信任、开发者模式或解锁需要我操作时，
+告诉我明确步骤，等我完成再继续。
 ```
 
-安装插件后，当前聊天可能需要重新连接才能加载工具，流程可在重连后继续。Apple 账号登录、设备信任、开发者模式及手机解锁仍需本人在系统界面完成。
+安装插件后，当前聊天可能需要重新连接才能加载工具，流程可在重连后继续。设备信任、开发者模式及手机解锁仍需本人在系统界面完成。
 
 仓库目前为私有，需要有 GitHub 访问权限，或者使用已取得的源代码包。
 
-## 安装依赖
-
-| 依赖 | 用途 |
-| --- | --- |
-| macOS 与 Codex 桌面端 / CLI | 安装本地插件、运行 MCP 服务与屏幕侧边栏 |
-| 完整 Xcode，已完成首次启动配置 | 编译、签名、部署和运行 WDA；仅 Command Line Tools 不够 |
-| 可在 Xcode 中使用的 Apple 账号和开发团队 | 签名手机端 WDA Runner |
-| USB 连接的真实 iPhone | 信任此 Mac，开启设备要求的开发者模式，安装与启动期间保持解锁 |
-| Python 3.9+ | 运行 MCP 服务；Python 端使用标准库 |
-| Node.js 20.19+、22.12+ 或 24+，npm 10+ | USB 转发与屏幕流；支持范围以项目 engines 和 doctor 检查为准 |
-
-Xcode 需要支持手机当前的 iOS 版本。无需越狱，也无需单独启动 Appium Server。WDA 固定使用已验证的 16.14.0 提交，下载、依赖安装、签名和构建由 setup 流程管理。
-
-### 先在自己的 iPhone 上安装并启动 WDA
-
-手机端使用 [Appium 维护的 WebDriverAgent](https://github.com/appium/WebDriverAgent)。首次使用时，须通过 Xcode 用你自己的 Apple 账号与开发团队签名、安装并启动 `WebDriverAgentRunner`。
-
-推荐使用上面的安装提示词和下面的 `iphone-use-setup` 流程：Codex 获取本项目固定版本的 WDA，配置你的设备和签名，再完成构建、部署与启动；需要你完成 Apple 登录、设备信任、开发者模式或解锁时，会提示具体步骤。
-
-如需在 Xcode 手动处理：
-
-1. 用 USB 连接自己的 iPhone，信任这台 Mac，按系统要求开启开发者模式，并在 Xcode 中配置自己的 Apple 账号。
-2. 打开获取的 WDA 源码中的 `WebDriverAgent.xcodeproj`，选择 `WebDriverAgentRunner` scheme 和自己的 iPhone；在 Runner target 的 **Signing & Capabilities** 中选择自己的 Team 与可签名的 Bundle Identifier。
-3. 使用 **Product → Test** 构建、安装并运行 WDA Runner，按手机上的实际提示完成信任。运行测试会启动 WDA 服务；安装后仍需要该服务处于运行状态。
-
-安装插件并完成 USB 连接配置后，以 `pua_ready` 返回 `ready=true` 为准，再开始手机任务。设备与签名要求可参考 [Appium 真机准备说明](https://appium.github.io/appium-xcuitest-driver/latest/getting-started/device-setup/)。
-
-### 安装插件
+## 安装插件
 
 ```sh
 git clone https://github.com/zhongerxin/iPhone-use.git
@@ -130,13 +74,13 @@ sh scripts/install.sh
 
 源代码包解压后，也可以在包目录运行同一个安装脚本。安装完成后重连或新开 Codex 聊天。
 
-### 连接自己的 iPhone
+## 连接并验证
 
 在新聊天中启用 **iPhone Use**，输入：
 
-> 用 iphone-use-setup 帮我配置通过 USB 连接的 iPhone，安装并启动 WDA，验证 READY，然后显示手机屏幕。
+> 用 iphone-use-setup 帮我配置通过 USB 连接的 iPhone，验证 READY，然后显示手机屏幕。
 
-技能引导 Codex 完成诊断、设备发现、签名配置、获取 WDA、后台构建与启动。已配置过的设备会复用配置和构建，正常任务不需要每次重装。`pua_ready` 返回 `ready=true` 后才开始手机任务。
+技能引导 Codex 运行 `pua_setup` 的 `discover` 与 `configure`，把设备 UDID 写进状态目录，再用 `pua_ready` 证明两条通道都能用：`proof.coredevice` 与 `proof.axe` 同时为 true 才返回 `ready=true`。锁屏时 `pua_ready` 返回 `state: "locked"` 而不是报错，先解锁再继续。
 
 ## 可以做什么
 
@@ -144,61 +88,60 @@ sh scripts/install.sh
 | --- | --- |
 | App 导航与操作 | 打开目标 App，进入搜索、详情、设置或草稿页面 |
 | 页面读取 | 获取紧凑控件树、文字、位置和实际截图 |
-| 点击与手势 | 按控件或坐标点击，滑动和拖动，等待页面目标出现 |
-| 中文与长文本输入 | 一次提供完整 Unicode 文字，长文本分段输入并支持续传 |
+| 点击与手势 | 按控件或坐标点击，滑动，等待页面目标出现 |
+| 文本输入 | 一次提供完整 ASCII 文字，可带换行与 Tab |
 | 连续任务 | 将已知点击、输入、等待等步骤组成一次 batch，减少模型往返 |
-| 列表搜索与采集 | 有界滚动查找、重叠读取与去重，返回覆盖边界 |
-| 可见失败恢复 | 控件被遮挡、未聚焦或树不完整时，查看新截图并重新选择点击位置 |
+| 可见失败恢复 | 控件被遮挡、不唯一或树不完整时，查看新截图并重新选择点击位置 |
 | 实时手机屏幕 | iPhone 外壳、设备状态、操作光效与清楚可见的点击 / 拖动提示 |
-| 连接恢复 | 复用后台启动工作、重建失效会话；用户可点击刷新重新连接预览 |
+| 连接恢复 | 预览可刷新重连；区分锁屏暂停与主动暂停 |
 
 示例提示词：
 
 ```text
-用 iPhone Use 打开备忘录，新建一条草稿，输入下面的中文内容，核对文字后保留。
+用 iPhone Use 打开备忘录，新建一条草稿，输入下面的内容，核对后保留。
 
 打开目标 App，搜索这个名称，读取前几项结果并整理给我。
 
-读取这个列表，分段滚动并去重，说明已经覆盖的范围和还未确认的部分。
+把这个页面上的列表从头翻到尾，记录每一项的标题。
 ```
 
-输入与提交分开，工具默认不提交文字。模型需要核对关键页面、接收人、数量和最终结果。密码、验证码、Face ID 等认证交给用户完成，接管期间可以暂停预览。
+输入与提交分开，工具不会替你按下发送键。模型需要核对关键页面、接收人、数量和最终结果。密码、验证码、Face ID 等认证交给用户完成，接管期间可以暂停预览。
 
 屏幕预览在同一聊天中复用已有 widget。底部提供刷新、主屏幕和截图按钮；无图像时保留黑色屏幕的 iPhone 外壳，屏幕内仅显示对应状态图标，顶部显示连接或暂停状态。预览供用户观看，模型定位仍以工具返回的实际图像或控件为依据。
 
 ## 技术亮点
 
-- **本地 USB 通道。** Python MCP 服务通过本机 loopback 转发访问 WDA，运行数据和签名构建保留在本机。
-- **减少重复工作。** 复用 HTTP 连接、WDA session、健康服务与已有构建；首次任务确认 READY，后续沿健康通道继续。
-- **紧凑观察与组合动作。** 控件树省略重复字段；仅需截图时不生成 XML；batch、滚动查找和列表采集减少工具回合。
-- **安装任务异步执行。** 下载、构建与启动返回可查询的工作 ID，重复 setup 优先复用正在进行的工作。
-- **截图回退。** 元素定位失败时返回截图与处理指引；图像像素乘以 `image.pixel_to_point` 转为 iPhone 点坐标，再交给 `pua_tap`。
-- **明确失败语义。** 多进程共享操作锁；动作超时或断线可能标记不确定，先读实际状态，避免盲目重放点击、输入或提交。
-- **实时预览与暂停恢复。** 屏幕流不落盘；区分锁屏与主动暂停，解锁后的 READY 可恢复锁屏预览，刷新可主动重连。
+- **本机 USB 直连。** `pymobiledevice3` 在独立进程里持有隧道与 HID 会话，MCP 主进程只用标准库，通过 JSON-lines 通信；不开放端口，不装手机端服务。
+- **两棵来源明确的树。** 元素树来自 AXe 的辅助功能快照，坐标与 HID 来自 CoreDevice；两者都失败时才提示检查 USB、信任与解锁。
+- **紧凑观察。** 节点省略与文字重复的 name / value，只标注异常状态（`enabled:false`、`visible:false`、`in_viewport:false`）；截图默认缩放为模型友好的 JPEG，原图仅在 `IPHONE_USE_IMAGE=original` 时保留。
+- **截图兜底。** 元素定位失败时返回截图与 `image.pixel_to_point`，按 iPhone 点坐标调用 `pua_tap` 即可。
+- **明确失败语义。** 多进程共享操作锁；超时与 `uncertain` 结果要求先读实际状态，再决定是否重试，避免盲目重放点击或输入。
+- **解锁有前置证明。** 只有 AXe 报告锁屏才会输入密码，解锁后必须用新的元素树证明成功。
+- **实时预览与暂停恢复。** 屏幕流来自 CoreDevice 的视频流，不落盘；区分锁屏与主动暂停，刷新可主动重连。
 
-这些优化主要减少重复请求与模型往返，完整任务速度仍取决于 App、USB / WDA 状态和模型响应。工程回归与真机验收分别记录在本地开发资料中。
+这些优化主要减少重复请求与模型往返，完整任务速度仍取决于 App、USB 状态和模型响应。
 
 ## 工具概览
 
-模型可用 17 个工具，另有 2 个仅供屏幕 widget 使用的工具。
+模型可用 16 个工具，另有 2 个仅供屏幕 widget 使用的工具。
 
 | 工具 | 用途 |
 | --- | --- |
-| `pua_doctor`、`pua_setup`、`pua_ready` | 环境诊断、设备配置、后台安装 / 启动与就绪检查 |
+| `pua_doctor`、`pua_setup`、`pua_ready` | 环境诊断、设备发现与配置、就绪证明 |
 | `pua_observe`、`pua_find` | 控件树、截图与目标查询 |
 | `pua_apps`、`pua_launch_app` | 查询 App 标识、读取安装证据和启动 App |
-| `pua_tap`、`pua_swipe`、`pua_press_button` | 点击、滑动、主屏幕等操作 |
-| `pua_type_text`、`pua_wait` | Unicode 输入与有界等待 |
-| `pua_batch`、`pua_scroll_find`、`pua_collect_list` | 组合动作、滚动查找与列表采集 |
+| `pua_tap`、`pua_swipe`、`pua_press_button` | 点击、滑动、主屏幕与音量键 |
+| `pua_type_text`、`pua_wait` | ASCII 输入与有界等待 |
+| `pua_unlock`、`pua_batch` | 锁屏解锁、组合动作 |
 | `pua_screen`、`pua_metrics` | 预览开关与有界耗时统计 |
 
-界面异常时先返回截图，再由模型判断下一步：滚动查找一次最多滑一次，仍找不到可点击目标就暂停；遮挡、滚动无进展、输入不符或预期页面未出现也走截图兜底。已有截图直接复用，不自动继续盲滑或重放操作。
+界面异常时先返回截图，再由模型判断下一步。遮挡、滚动无进展、输入不符或预期页面未出现也走截图兜底。已有截图直接复用，不自动继续盲滑或重放操作。
 
 ## 本机数据与升级
 
-新安装默认使用 `~/.local/share/iphone-use/`，可通过 `IPHONE_USE_STATE_DIR` 指定外部目录；原 `WDA_STATE_DIR` 仍兼容。升级时若新目录不存在，会继续使用检测到的旧配置目录，保留设备、签名和构建。不要为了改名删除运行数据。
+新安装默认使用 `~/.local/share/iphone-use/`，可通过 `IPHONE_USE_STATE_DIR` 指定外部目录；旧版 `WDA_STATE_DIR` 仍兼容。升级时若新目录不存在，会继续使用检测到的旧配置目录，保留设备配置。
 
-运行目录权限为 700，私有配置和图像文件为 600。明确调用的截图有保留上限，预览流不落盘。签名材料、设备数据、运行日志与依赖目录均不进入源代码发布包。`WDA_URL` 可指定本机地址，默认转发端口为 18100，远程地址会被拒绝。
+运行目录权限为 700，私有配置和图像文件为 600。明确调用的截图有保留上限，预览流不落盘。设备数据、运行日志与依赖目录均不进入源代码发布包。
 
 更新已克隆的仓库：
 
@@ -207,7 +150,7 @@ git pull --ff-only
 sh scripts/install.sh
 ```
 
-重新连接聊天以加载更新后的工具、技能和屏幕资源。若手机连接失败，先检查 USB、设备解锁、开发者模式、Xcode 签名与 setup 返回的具体错误；已有启动工作应继续查询，避免反复重启。
+重新连接聊天以加载更新后的工具、技能和屏幕资源。若手机连接失败，先检查 USB、设备解锁、开发者模式与 `pua_doctor` 返回的具体错误。
 
 ## 开发与文档
 
@@ -227,8 +170,8 @@ python3 scripts/package.py
 
 ## 依赖与致谢
 
-本项目依赖 [Appium](https://github.com/appium/appium) 生态与 [WebDriverAgent](https://github.com/appium/WebDriverAgent)：WDA 提供手机端的自动化执行服务，[appium-ios-device](https://github.com/appium/appium-ios-device) 提供 USB 设备通信、端口转发与屏幕流连接能力。iPhone Use 在这些基础上提供 Codex 插件、MCP 工具、安装引导与屏幕 widget，无需单独运行 Appium Server。
+本项目使用 [CoreDevice](https://github.com/doronz88/pymobiledevice3) 的原生隧道与 HID 能力，以及 [AXe](https://github.com/cameroncooke/AXe) 的辅助功能树读取。iPhone Use 在这些基础上提供 Codex 插件、MCP 工具、安装引导与屏幕 widget。
 
-感谢 Appium、WebDriverAgent 及相关项目的维护者和贡献者，让真实 iPhone 的自动化操作成为可能。
+感谢 pymobiledevice3、AXe 及相关项目的维护者和贡献者，让真实 iPhone 的自动化操作成为可能。
 
 MIT License。第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

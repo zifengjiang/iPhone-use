@@ -4,35 +4,38 @@
 
 ![iPhone Use controlling a real iPhone in Codex with a live screen preview](assets/iphone-use-demo.png)
 
-Let Codex operate your real iPhone over USB. Describe a task in natural language: open apps, read screens, tap, scroll, enter text, collect lists, and watch the phone in a sidebar widget.
+Let Codex operate your real iPhone over USB. Describe a task in natural language: open apps, read screens, tap, scroll, enter text, and watch the phone in a sidebar widget.
 
-The plugin connects to [WebDriverAgent](https://github.com/appium/WebDriverAgent) (WDA). It includes a local MCP server, setup and usage skills, and a live screen widget. It reuses healthy connections and existing builds; when element targeting fails, it guides the model to inspect a screenshot and try coordinates.
+Nothing has to be installed or signed on the phone. iPhone Use uses exactly two local channels:
 
-**Before using iPhone Use, install, sign, and start WDA Runner on your own iPhone.** WDA is the on-device execution service. The prompt and setup workflow below can help Codex complete the initial installation; a healthy existing WDA can be reused.
+| Channel | Covers | How |
+| --- | --- | --- |
+| CoreDevice | Screenshots, coordinate taps, swipes, keyboard, Home / volume keys, unlock, app launch | `pymobiledevice3` in its own interpreter, driven over a JSON-lines subprocess protocol |
+| AXe | Element tree, selector taps | The local `axe` binary, reading the accessibility tree through the CoreDevice tunnel |
 
-## CoreDevice hybrid backend
+Both run on the Mac. USB traffic goes straight through `pymobiledevice3`: no port forwarder, no HTTP server, no on-device app. When element targeting fails, the tool returns the current screenshot and point scale so the model can fall back to coordinates.
 
-`IPHONE_USE_BACKEND=hybrid` runs iCTRL and CoreDevice side by side in one process: pictures come from CoreDevice, the text tree stays on iCTRL. Use it when a run needs a structured page and also has to work while the phone is locked.
+## Requirements
 
-1. Give CoreDevice its own interpreter. The MCP process itself does not need `pymobiledevice3`.
+| Requirement | Purpose |
+| --- | --- |
+| macOS and Codex desktop / CLI | Local plugin installation, MCP, and the screen sidebar |
+| A real iPhone connected over USB | Trust the Mac, enable Developer Mode, keep it unlocked while in use |
+| Python 3.9+ | Run the MCP server using Python's standard library |
+| A separate CoreDevice interpreter (`pymobiledevice3` + `Pillow`) | Screenshots, HID gestures, keyboard, buttons, unlock, app launch |
+| The [AXe](https://github.com/cameroncooke/AXe) binary | Accessibility tree and selector taps |
+| Node.js 20.19+, 22.12+, or 24+; npm 10+ | Only to build the screen widget locally |
 
-   ```bash
-   /opt/homebrew/bin/python3 -m venv ~/.local/share/iphone-use-coredevice/venv
-   ~/.local/share/iphone-use-coredevice/venv/bin/pip install pymobiledevice3 Pillow
-   ```
+One-time preparation (two commands, nothing to repeat later):
 
-2. Point both backends at the device: the full iCTRL `device_id` and the UDID from `devicectl`.
+```bash
+/opt/homebrew/bin/python3 -m venv ~/.local/share/iphone-use-coredevice/venv
+~/.local/share/iphone-use-coredevice/venv/bin/pip install pymobiledevice3 Pillow
 
-   ```bash
-   export IPHONE_USE_BACKEND=hybrid
-   export IPHONE_USE_ICTRL_DEVICE_ID='<full device_id>'
-   export IPHONE_USE_COREDEVICE_UDID='00008150-0000000000000001'
-   export IPHONE_USE_UNLOCK_PASSCODE='<passcode, optional>'
-   ```
+brew install cameroncooke/axe/axe   # or install AXe to ~/.local/share/iphone-use-axe/axe
+```
 
-3. Check it: `pua_ready` reports `backend: "hybrid"` and `coredevice: true`; `pua_unlock` types the passcode through CoreDevice gestures and returns `locked: false`; `pua_lockstate` reports the lock state, or `null` when CoreDevice cannot answer (it has no such query on iOS 27.2.1).
-
-Screenshots, coordinate taps, swipes, the Home and volume keys, typing and unlock run on CoreDevice (a warm tap takes 52 ms; the Runner needs about 1.1 s). The text tree, page elements and app launch stay on iCTRL. When the Runner drops, screenshots and coordinate actions degrade to CoreDevice and the `app` field reads `unknown`; an action that times out on CoreDevice is never replayed on iCTRL. A locked, session-less phone stays operable, which the iCTRL backend alone cannot do.
+`pua_doctor` reports whether both are in place. The defaults are `~/.local/share/iphone-use-coredevice/venv/bin/python` and `~/.local/share/iphone-use-axe/axe`; override them with `IPHONE_USE_COREDEVICE_PYTHON` and `IPHONE_USE_AXE`.
 
 ## Ask Codex to install it
 
@@ -43,50 +46,21 @@ Install and configure iPhone Use for me:
 https://github.com/zhongerxin/iPhone-use
 
 Read the repository README and installation script first. Check Codex CLI,
-Python, Node.js, npm, full Xcode, and the iPhone connected over USB.
-Clone the project into a suitable local directory and run sh scripts/install.sh.
+Python, Node.js, npm, and the iPhone connected over USB. Clone the project into
+a suitable local directory and run sh scripts/install.sh.
 
-If this chat cannot load the new tools, tell me to reconnect or start a new chat
-and continue there. Once tools are available, read the iphone-use-setup skill.
-Inspect existing configuration and reuse healthy WDA. For initial setup,
-discover my device, use my own Apple development team and signable bundle ID,
-fetch the pinned WDA, configure signing, build and start it. Continue until
-pua_ready returns ready=true, then show the phone screen. Do not reuse the
-author's device identifiers or signing configuration.
+Create the CoreDevice interpreter, install pymobiledevice3 and Pillow there, and
+confirm the AXe binary is available. If this chat cannot load the new tools, tell
+me to reconnect or start a new chat and continue there. Once tools are available,
+read the iphone-use-setup skill, run pua_setup to discover the device and pin its
+UDID, and continue until pua_ready returns ready=true. Then show the phone
+screen. Do not reuse the author's device identifiers.
 
-Help resolve missing dependencies. If Apple account login, device trust,
-Developer Mode, or unlocking needs my input, explain the exact steps and wait
-for me to complete them before continuing.
+Help resolve missing dependencies. If device trust, Developer Mode, or unlocking
+needs my input, explain the exact steps and wait for me to complete them.
 ```
 
-A reconnect may be required to load newly installed tools. Apple account login, device trust, Developer Mode, and unlocking must be completed by the device owner in the system UI. The repository is currently private; GitHub access or a source package is required.
-
-## Requirements
-
-| Requirement | Purpose |
-| --- | --- |
-| macOS and Codex desktop / CLI | Local plugin installation, MCP, and the screen sidebar |
-| Full Xcode with first-launch setup completed | Build, sign, deploy, and run WDA; Command Line Tools alone are insufficient |
-| An Apple account and development team available in Xcode | Sign the on-device WDA Runner |
-| A real iPhone connected over USB | Trust the Mac, enable Developer Mode when required, and keep it unlocked during installation / startup |
-| Python 3.9+ | Run the MCP server using Python's standard library |
-| Node.js 20.19+, 22.12+, or 24+; npm 10+ | USB forwarding and screen streaming; see the project engines and doctor checks |
-
-Xcode must support the phone's iOS version. No jailbreak or separate Appium Server is required. Setup uses a verified, pinned WDA 16.14.0 commit and manages downloads, dependencies, signing, and builds locally.
-
-## Install and start WDA on your own iPhone
-
-The phone-side service comes from [Appium's WebDriverAgent](https://github.com/appium/WebDriverAgent). First-time setup signs and installs `WebDriverAgentRunner` using your own Apple account and development team.
-
-The installation prompt and `iphone-use-setup` workflow fetch the project's pinned WDA version, configure signing, build, deploy, and start it. Codex will explain any steps requiring your input.
-
-For manual Xcode setup:
-
-1. Connect your iPhone over USB, trust the Mac, enable Developer Mode when required, and configure your Apple account in Xcode.
-2. Open `WebDriverAgent.xcodeproj`, select the `WebDriverAgentRunner` scheme and your iPhone, and configure your Team and a signable Bundle Identifier in the Runner target's **Signing & Capabilities**.
-3. Use **Product → Test** to build, install, and start the runner. Complete any trust prompts on the phone. The WDA service must remain running.
-
-After installing the plugin and configuring USB connectivity, start phone tasks only when `pua_ready` returns `ready=true`. See [Appium's device preparation guide](https://appium.github.io/appium-xcuitest-driver/latest/getting-started/device-setup/) for device and signing requirements.
+A reconnect may be required to load newly installed tools. Device trust, Developer Mode, and unlocking must be completed by the device owner in the system UI. The repository is currently private; GitHub access or a source package is required.
 
 ## Install and connect
 
@@ -100,9 +74,9 @@ The installer validates and stages the source, registers a local Codex marketpla
 
 Reconnect or start a new chat, enable **iPhone Use**, and ask:
 
-> Use iphone-use-setup to configure my USB-connected iPhone, install and start WDA, verify READY, and show the phone screen.
+> Use iphone-use-setup to configure my USB-connected iPhone, verify READY, and show the phone screen.
 
-Setup covers diagnostics, device discovery, signing configuration, download, background build, and startup. Existing configurations and builds are reused. Phone tasks start only after `pua_ready` returns `ready=true`.
+The skill runs `pua_setup` with `discover` then `configure` to pin the device UDID, then `pua_ready` proves both channels: `ready=true` only when `proof.coredevice` and `proof.axe` are both true. A locked phone returns `state: "locked"` instead of an error; unlock it and continue.
 
 ## Features
 
@@ -110,13 +84,12 @@ Setup covers diagnostics, device discovery, signing configuration, download, bac
 | --- | --- |
 | App navigation | Launch apps and navigate search, details, settings, or drafts |
 | Screen reading | Compact accessibility trees, text, positions, and actual screenshots |
-| Taps and gestures | Element or coordinate taps, swipes, drags, and bounded waits |
-| Unicode and long text | Complete text input, chunked long-text entry, and continuation |
+| Taps and gestures | Element or coordinate taps, swipes, and bounded waits |
+| Text input | Complete ASCII text in one call, including newlines and tabs |
 | Batch workflows | Combine known actions into one call to reduce model round trips |
-| List search and collection | Bounded scrolling, overlap, deduplication, and explicit coverage |
-| Visual recovery | Inspect a fresh screenshot when targets are occluded, unfocused, or missing from the tree |
+| Visual recovery | Inspect a fresh screenshot when targets are occluded, ambiguous, or missing from the tree |
 | Live preview | An iPhone frame, status, edge effects, and visible tap / drag indicators |
-| Connection recovery | Reuse startup jobs, recreate invalid sessions, and reconnect preview with Refresh |
+| Connection recovery | Refresh the preview; lock-induced pauses and explicit pauses stay distinct |
 
 Example prompts:
 
@@ -125,54 +98,53 @@ Open Notes, create a draft with the following text, verify it, and leave it ther
 
 Open the target app, search for this name, and summarize the first few results.
 
-Read this list while scrolling with overlap. Deduplicate entries and state the
-covered range and any remaining uncertainty.
+Page through the whole list on this screen and record every title.
 ```
 
-Text input and submission are separate; text is not submitted by default. The model checks key screens, recipients, counts, and final results. Passwords, verification codes, and Face ID are handled by the user; preview can be paused during handoff.
+Text input and submission are separate; nothing is submitted for you. The model checks key screens, recipients, counts, and final results. Passwords, verification codes, and Face ID are handled by the user; preview can be paused during handoff.
 
 Repeated preview opens in the same chat reuse the existing widget. Its toolbar offers Refresh, Home, and Screenshot. Without an image, the iPhone frame shows a dark screen with a centered status icon; the top badge displays the connection or pause state. The preview is for the user; model decisions use actual tool observations.
 
 ## Technical details
 
-- **Local USB transport:** Python accesses WDA through a loopback-only forwarder; runtime and signing data stay on the Mac.
-- **Reuse:** persistent HTTP connections, WDA sessions, healthy services, and builds reduce repeated work.
-- **Compact observations and compound actions:** omit duplicate tree fields, skip XML for screenshot-only reads, and reduce turns with batch / scroll-search / list collection.
-- **Background setup:** downloads, builds, and startup return queryable job IDs; repeated setup reuses matching active jobs.
+- **Direct local USB.** `pymobiledevice3` holds the tunnel and HID session in a separate process; the MCP server stays on the standard library and talks JSON lines to it. No open port, no on-device service.
+- **Two explicit sources.** The element tree comes from AXe's accessibility snapshot; coordinates and HID come from CoreDevice. Only when both fail does the tool ask you to check USB, trust, and unlock.
+- **Compact observations.** Repeated name / value fields are dropped and only negative states are named (`enabled:false`, `visible:false`, `in_viewport:false`); screenshots are model-sized JPEGs unless `IPHONE_USE_IMAGE=original`.
 - **Screenshot fallback:** inspect the image and multiply pixels by `image.pixel_to_point` to obtain iPhone point coordinates for `pua_tap`.
-- **Explicit failure semantics:** a shared operation lock guards concurrent processes; uncertain mutations require reading the actual state before retrying.
-- **Preview lifecycle:** streamed frames are not saved to disk; lock-induced pauses and explicit pauses are distinguished, and Refresh can reconnect.
+- **Explicit failure semantics:** a shared operation lock guards concurrent processes; timeouts and `uncertain` results require reading the actual state before retrying.
+- **Unlock is proved first.** The passcode is typed only after AXe reports a locked phone, and a fresh tree must confirm the result.
+- **Preview lifecycle:** the stream comes from CoreDevice video capture and is never written to disk; lock-induced pauses and explicit pauses are distinguished, and Refresh can reconnect.
 
-These changes reduce duplicate requests and model round trips. Overall task speed still depends on the app, USB / WDA state, and model response time. Engineering regressions and device acceptance checks are recorded separately in local development notes.
+These changes reduce duplicate requests and model round trips. Overall task speed still depends on the app, the USB link, and model response time.
 
 ## Tools
 
-There are 17 model tools and 2 additional widget-only tools.
+There are 16 model tools and 2 additional widget-only tools.
 
 | Tools | Purpose |
 | --- | --- |
-| `pua_doctor`, `pua_setup`, `pua_ready` | Diagnostics, configuration, background installation / startup, readiness |
+| `pua_doctor`, `pua_setup`, `pua_ready` | Diagnostics, device discovery and configuration, readiness proof |
 | `pua_observe`, `pua_find` | Trees, screenshots, and target queries |
 | `pua_apps`, `pua_launch_app` | App identifiers, installation evidence, app launch |
-| `pua_tap`, `pua_swipe`, `pua_press_button` | Taps, swipes, and device buttons |
-| `pua_type_text`, `pua_wait` | Unicode input and bounded waits |
-| `pua_batch`, `pua_scroll_find`, `pua_collect_list` | Compound actions, search, collection |
+| `pua_tap`, `pua_swipe`, `pua_press_button` | Taps, swipes, Home and volume buttons |
+| `pua_type_text`, `pua_wait` | ASCII input and bounded waits |
+| `pua_unlock`, `pua_batch` | Unlocking and compound actions |
 | `pua_screen`, `pua_metrics` | Preview controls and bounded timing statistics |
 
-Abnormal UI states return a screenshot for the model to inspect before choosing another action. Scroll search performs at most one swipe per call and stops if the target remains unreachable; occlusion, unproven scroll progress, input mismatch, and failed page expectations use the same fallback. Existing screenshots are reused, without automatic extra gestures or action replay.
+Abnormal UI states return a screenshot for the model to inspect before choosing another action. Occlusion, unproven scroll progress, input mismatch, and failed page expectations use the same fallback. Existing screenshots are reused, without automatic extra gestures or action replay.
 
 ## Runtime data and updates
 
-New installations use `~/.local/share/iphone-use/`. Set `IPHONE_USE_STATE_DIR` for another external directory; `WDA_STATE_DIR` remains supported. If the new default directory does not exist, an existing older configuration directory is reused so device configuration and builds are retained.
+New installations use `~/.local/share/iphone-use/`. Set `IPHONE_USE_STATE_DIR` for another external directory; the legacy `WDA_STATE_DIR` name remains supported. If the new default directory does not exist, an existing older configuration directory is reused so the pinned device is retained.
 
-Runtime directories use mode 700 and private configuration / image files use 600. Explicit screenshots have retention limits; preview streams stay in memory. Signing material, device data, logs, and dependency directories are excluded from source packages. `WDA_URL` accepts a local address; the default forwarded port is 18100, and remote addresses are rejected.
+Runtime directories use mode 700 and private configuration / image files use 600. Explicit screenshots have retention limits; preview streams stay in memory. Device data, logs, and dependency directories are excluded from source packages.
 
 ```sh
 git pull --ff-only
 sh scripts/install.sh
 ```
 
-Reconnect the chat after updating. For connection failures, check USB, unlocking, Developer Mode, signing, and the specific setup error. Query an existing startup job before restarting again.
+Reconnect the chat after updating. For connection failures, check USB, unlocking, Developer Mode, and the specific `pua_doctor` error.
 
 ## Development and documentation
 
@@ -189,8 +161,8 @@ See [screen preview and recovery](skills/iphone-use/references/screen.md), [app 
 
 ## Dependencies and acknowledgements
 
-This project relies on the [Appium](https://github.com/appium/appium) ecosystem and [WebDriverAgent](https://github.com/appium/WebDriverAgent). WDA provides the on-device automation service; [appium-ios-device](https://github.com/appium/appium-ios-device) provides USB device communication, port forwarding, and screen-stream connectivity. iPhone Use adds the Codex plugin, MCP tools, setup guidance, and screen widget. A separate Appium Server is not required.
+This project uses CoreDevice tunnelling and HID from [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), and the accessibility tree from [AXe](https://github.com/cameroncooke/AXe). iPhone Use adds the Codex plugin, MCP tools, setup guidance, and screen widget.
 
-Thanks to the maintainers and contributors of Appium, WebDriverAgent, and related projects for making real iPhone automation possible.
+Thanks to the maintainers and contributors of pymobiledevice3, AXe, and related projects for making real iPhone automation possible.
 
 MIT License. See [third-party notices](THIRD_PARTY_NOTICES.md).

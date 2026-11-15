@@ -1,11 +1,14 @@
 # 更新记录
 
-## 未发布 — iCTRL 重连不再重新发现
+## 未发布 — 只保留 CoreDevice + AXe
 
-- iCTRL 后端把最后一次成功的端点写进令牌目录旁的 `iphone-use-endpoint-<device>.json`（0600），重连先做一次 `device_info` 探活（1.2 秒上限），失败才回落到附近发现；连接缓存由 30 秒放宽到 300 秒。此前空闲超过 30 秒后的每个动作都要付约 3 秒的 DNSService 浏览开销。
-- 附近发现一找到目标设备就返回（`nearby_scan(want=...)`，等待上限 1.5 秒），不再固定等满 3 秒。
-- 通道排序改为 Wi-Fi 优先，不再把 AWDL 排在前面：同一设备实测 LAN 中位 61ms，AWDL 中位 240ms 且抖动明显。
-- 实测（iPhone 17 / iOS 27.2.1）：重连 3.3 秒 → 0.05 秒（有缓存）/ 0.16 秒（冷启动）。
+- **删除 WDA 后端。** `server/wda_client.py`、`wda_controller.py`、`wda_setup.py`、`wda_text.py`，`tooling/` 下的 node 转发器与 MJPEG 桥接，以及 Xcode / WebDriverAgent 安装、签名、iproxy 与 `/wda/*` 全部移除。手机端不再安装任何 runner。
+- **删除 iCTRL 后端。** `server/ictrl_backend.py`、`server/vendor/ictrl_rpc.py` 与 `IPHONE_USE_BACKEND`、`IPHONE_USE_ICTRL_DEVICE_ID`、Runner 降级与配对流程移除；预览只保留 CoreDevice 视频流。
+- **唯一控制器。** `HybridController` 收敛为 `DeviceController`：截图、HID、键盘、按键、解锁与启动走 CoreDevice，元素树与按选择器点击走 AXe，两处都失败时返回截图与坐标换算。
+- **工具目录合并为一套。** 16 个模型工具 + 2 个 widget 工具，包含 `pua_unlock`、`pua_type_text`、`pua_screen`；`scroll_find`、`collect_list`、`verify`、`replace`、`submit`、`continue_token` 与 `predicate` 等只有 WDA 树能兑现的参数移除。
+- **解锁有前置证明。** 只有 AXe 报告锁屏时 `pua_unlock` 才输入密码，解锁后必须用新的元素树证明成功；没有锁屏密码的测试机不会被误点。
+- **安装只需两条命令。** CoreDevice 助手使用独立 venv（`pymobiledevice3` + `Pillow`），元素树使用 AXe 二进制；`pua_doctor` 直接报告两者与 USB 探测结果。
+- 测试从 422 项收敛为 158 项，删除只覆盖 WDA / iCTRL 的用例，保留并改造截图、点击、解锁、预览、目录契约与打包校验。
 
 ## 0.3.6 — 2026-10-08
 

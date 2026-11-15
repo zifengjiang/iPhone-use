@@ -1,14 +1,11 @@
 # Third-party components
 
-The WDA runtime fetches Appium WebDriverAgent 16.14.0 at commit
-`d17782422d55ff1e5e0ceb74eb1fd509cc0c35b6` from
-https://github.com/appium/WebDriverAgent. WDA is BSD licensed; its original
-LICENSE stays in the external checkout. WDA source, builds and signing data
-are not bundled into this plugin.
-
-USB forwarding uses appium-ios-device 3.1.24 under Apache-2.0, installed via
-tooling/package-lock.json. The dependency's license remains in node_modules.
-The Python MCP server uses only the Python standard library.
+The phone is driven by two local components that this plugin does not bundle:
+[AXe](https://github.com/cameroncooke/AXe) (MIT) for the accessibility tree,
+installed separately as a binary, and `pymobiledevice3` (GPL-3.0-or-later) with
+[Pillow](https://python-pillow.org) (MIT-CMU) inside the CoreDevice helper's own
+virtual environment. `server/coredevice_helper.py` imports both at runtime; the
+MCP server itself uses only the Python standard library.
 
 ## Screen widget SDK and bundled browser dependencies
 
@@ -430,7 +427,3 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 The complete list of contributors can be found at:
 - https://github.com/garycourt/uri-js/graphs/contributors
 ```
-
-## iCTRL reference client
-
-`server/vendor/ictrl_rpc.py` is the unmodified reference client from [OpenMinis/iCTRL at c1e4268](https://github.com/OpenMinis/iCTRL/blob/c1e4268859ba858d1579f7b846a56cb40641b7f6/Scripts/ictrl_rpc.py), licensed under Apache-2.0. The accompanying license and notice are included in `server/vendor/iCTRL-LICENSE` and `server/vendor/iCTRL-NOTICE.md`. The Runner is installed separately.

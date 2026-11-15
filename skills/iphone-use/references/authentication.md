@@ -8,7 +8,7 @@
 | --- | --- |
 | App 的登录 / 密码 / 生物识别提示 | 请求用户在该 App 内完成认证；暂停手机调用，随后重新观察目标页。READY 不能证明 App 已登录。 |
 | `phone_locked` 或实际手机锁屏 | 请用户亲自解锁 iPhone、保持唤醒，完成后重验 READY 并观察目标 App。 |
-| `local.pid.0` / `pua_foreground_unavailable` / XCTest Code 41 | 依照 setup skill 恢复 PUA 通道；不能当作 App 密码错误。只有系统确实要求信任或认证时才让用户完成对应操作。 |
+| `axe_disconnected` / `axe_service_unavailable` / `coredevice_failed` | 按 setup skill 排查 USB、信任与解锁；不能当作 App 密码错误。只有系统确实要求信任或认证时才让用户完成对应操作。 |
 
 ## 交接时说明什么
 
