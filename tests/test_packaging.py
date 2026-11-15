@@ -42,8 +42,7 @@ class PackagingTests(unittest.TestCase):
             self.assertFalse(any(p.startswith(('docs/', 'evals/', 'plugins/', 'ui/node_modules/')) for p in contents))
         self.assertIn('tests/test_packaging.py', entries)
         self.assertIn('.github/workflows/check.yml', entries)
-        self.assertIn('scripts/benchmark.py', entries)
-        self.assertNotIn('scripts/benchmark.py', installed)
+        self.assertIn('scripts/smoke_mcp.py', entries)
         self.assertNotIn('scripts/smoke_mcp.py', installed)
         self.assertFalse(any(p.startswith(('tests/', '.github/')) for p in installed))
         self.assertEqual((self.root / 'docs/private-notes.md').read_text(), 'local-only fixture')
@@ -54,8 +53,7 @@ class PackagingTests(unittest.TestCase):
             rel = source.relative_to(ROOT)
             if source.is_file() and 'node_modules' not in rel.parts:
                 self.assertEqual((self.stage / rel).read_bytes(), source.read_bytes(), str(rel))
-        for name in ('assets/phone-screen.html', 'tooling/screen-stream.mjs', 'tooling/forward.mjs',
-                     'tooling/package-lock.json', 'scripts/phone.py', 'scripts/check_screen_ui.py'):
+        for name in ('assets/phone-screen.html', 'scripts/phone.py', 'scripts/check_screen_ui.py'):
             self.assertEqual((self.stage / name).read_bytes(), (ROOT / name).read_bytes(), name)
         for document in list((self.stage / 'skills').rglob('*.md')) + [self.stage / 'README.md', self.stage / 'README.en.md', self.stage / 'CHANGELOG.md']:
             for target in re.findall(r'\]\(([^)]+)\)', document.read_text()):
@@ -88,7 +86,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(len(replies), 4)
         self.assertTrue(all('error' not in reply for reply in replies), str([r.get('error') for r in replies]))
         self.assertEqual(replies[0]['result']['serverInfo']['version'], version)
-        self.assertEqual(len(replies[1]['result']['tools']), 19)
+        self.assertEqual(len(replies[1]['result']['tools']), 18)
         uri = replies[2]['result']['resources'][0]['uri']
         read = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'resources/read', 'params': {'uri': uri}}) + '\n'
         process = subprocess.run([sys.executable, str(rebuilt / 'server/iphone_use.py')], input=read, capture_output=True, text=True, timeout=15, check=True)

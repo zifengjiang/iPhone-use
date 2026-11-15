@@ -1,6 +1,6 @@
-"""Prepare a WDA screenshot for a model: bounded pixel size, JPEG, exact point scale.
+"""Prepare a device screenshot for a model: bounded pixel size, JPEG, exact point scale.
 
-WDA always answers /screenshot with a native-resolution PNG, often several megabytes.
+The screen capture service answers with a native-resolution PNG, often several megabytes.
 Vision models downscale large images themselves, and each retained screenshot is sent
 again with every later request. Scaling once here, to a size the common model limits
 accept unchanged, keeps coordinates exact and removes most of the transferred bytes.
@@ -34,8 +34,9 @@ def fit_size(width, height, max_short=MAX_SHORT_SIDE, max_long=MAX_LONG_SIDE):
 
 
 def enabled():
-    """WDA_IMAGE=original returns the native PNG, for debugging legibility."""
-    return os.environ.get("WDA_IMAGE", "").strip().lower() != "original"
+    """IPHONE_USE_IMAGE=original returns the native PNG, for debugging legibility."""
+    setting = os.environ.get("IPHONE_USE_IMAGE") or os.environ.get("WDA_IMAGE", "")
+    return setting.strip().lower() != "original"
 
 
 def model_image(source, quality=JPEG_QUALITY, timeout=10):

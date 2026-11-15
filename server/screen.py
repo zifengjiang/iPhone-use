@@ -1,7 +1,8 @@
-"""Memory-only WDA MJPEG preview and a small, private cross-process activity bus.
+"""Memory-only MJPEG preview and a small, private cross-process activity bus.
 
 The widget supplies a short lease. No visible widget means no USB capture; opening
-the tool returns immediately. This module never calls the WDA command channel.
+the tool returns immediately. Frames come from the CoreDevice helper's own HEVC
+stream, decoded and re-encoded locally; the command channel is never involved.
 """
 from __future__ import annotations
 
@@ -15,7 +16,6 @@ import os
 from pathlib import Path
 import re
 import select
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -269,7 +269,7 @@ class ScreenHub:
                 if self._thread is None or not self._thread.is_alive():
                     self._stop = threading.Event()
                     self._thread = threading.Thread(target=self._run, args=(self._stop,), daemon=True,
-                                                    name="wda-screen-stream")
+                                                    name="coredevice-screen-stream")
                     self._thread.start()
         return self._wire(state, after_seq, last_event_id)
 
@@ -405,17 +405,6 @@ class ScreenHub:
                            "mimeType": "image/jpeg", "width": width, "height": height}
 
     @staticmethod
-    def _axe_binary():
-        override = os.environ.get("IPHONE_USE_AXE")
-        if override:
-            return override if Path(override).is_file() else None
-        found = shutil.which("axe")
-        if found:
-            return found
-        bundled = Path.home() / ".local" / "share" / "iphone-use-axe" / "axe"
-        return str(bundled) if bundled.is_file() else None
-
-    @staticmethod
     def _coredevice_python():
         override = os.environ.get("IPHONE_USE_COREDEVICE_PYTHON")
         if override:
@@ -425,9 +414,7 @@ class ScreenHub:
 
     @classmethod
     def _coredevice_command(cls, udid, config):
-        """The device's own HEVC stream, decoded by our helper: no Runner, no forwarder."""
-        if config.get("stream_backend") not in (None, "coredevice"):
-            return None
+        """The device's own HEVC stream, decoded by our helper."""
         python = cls._coredevice_python()
         helper = Path(__file__).with_name("coredevice_helper.py")
         if not python or not helper.is_file():
@@ -438,54 +425,13 @@ class ScreenHub:
         return [python, str(helper), "--stream", "--udid", udid, "--fps", str(fps),
                 "--quality", str(quality), "--scale", str(scale)]
 
-    @classmethod
-    def _axe_command(cls, udid, config):
-        """AXe already answers the device's own stream, so no Runner or forwarder is needed."""
-        binary = cls._axe_binary()
-        if not binary:
-            return None
-        fps = config.get("stream_fps", 10)
-        quality = config.get("stream_quality", 60)
-        scale = config.get("stream_scale", 0.5)
-        if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 30:
-            fps = 10
-        if isinstance(quality, bool) or not isinstance(quality, int) or not 1 <= quality <= 100:
-            quality = 60
-        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not 0.1 <= scale <= 1:
-            scale = 0.5
-        return [binary, "stream-video", "--udid", udid, "--format", "mjpeg",
-                "--fps", str(fps), "--quality", str(quality), "--scale", f"{scale:g}"]
-
     def _command(self):
         try:
             config = json.loads((self.state_dir / "config.json").read_text())
             udid = config.get("udid")
-            port = config.get("mjpeg_device_port", 9100)
             if not isinstance(udid, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,64}", udid):
                 return None
-            stream = self._coredevice_command(udid, config)
-            if stream:
-                return stream
-            if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
-                return None
-            node = shutil.which("node")
-            runtime = self.state_dir / "runtime/forward"
-            source = Path(__file__).resolve().parents[1] / "tooling/screen-stream.mjs"
-            if not node or not (runtime / "node_modules/appium-ios-device").is_dir() or not source.is_file():
-                return None
-            target = runtime / "screen-stream.mjs"
-            source_bytes = source.read_bytes()
-            if not target.is_file() or target.read_bytes() != source_bytes:
-                fd, temporary = tempfile.mkstemp(prefix=".screen-stream-", dir=runtime)
-                try:
-                    os.fchmod(fd, 0o600)
-                    with os.fdopen(fd, "wb") as stream:
-                        stream.write(source_bytes)
-                    os.replace(temporary, target)
-                finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
-            return [node, str(target), udid, str(port)]
+            return self._coredevice_command(udid, config)
         except (OSError, ValueError, AttributeError):
             return None
 

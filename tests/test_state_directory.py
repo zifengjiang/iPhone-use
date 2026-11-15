@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
-from wda_setup import state_directory
+from setup import state_directory
 from iphone_use import Runtime
 
 
@@ -17,7 +17,7 @@ class StateDirectoryTests(unittest.TestCase):
         self.home = Path(temporary.name)
         self.current = self.home / '.local/share/iphone-use'
         self.previous = self.home / '.local/share/iphone-use-wda'
-        for patcher in [patch('wda_setup.Path.home', return_value=self.home),
+        for patcher in [patch('setup.Path.home', return_value=self.home),
                         patch.dict(os.environ, {}, clear=True)]:
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -30,9 +30,8 @@ class StateDirectoryTests(unittest.TestCase):
         (self.previous / 'config.json').write_text('{"local_port": 19100}')
         self.assertEqual(state_directory(), self.previous)
         runtime = Runtime()
-        self.addCleanup(runtime.client.close)
+        self.addCleanup(runtime.close)
         self.assertEqual(runtime.state_dir, self.previous.resolve())
-        self.assertEqual(runtime.base_url, 'http://127.0.0.1:19100')
         self.assertEqual(runtime.setup_manager.state_dir, self.previous.resolve())
         self.assertFalse(self.current.exists())
 

@@ -11,7 +11,7 @@ import urllib.parse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
-from wda_apps import CATALOG_PATH, fetch_apple, parse_apple
+from apps import CATALOG_PATH, fetch_apple, parse_apple
 
 
 def refresh(path):

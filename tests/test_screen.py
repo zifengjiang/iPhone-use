@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
-from wda_screen import MJPEGParser, ScreenHub, jpeg_dimensions
+from screen import MJPEGParser, ScreenHub, jpeg_dimensions
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,7 +125,7 @@ class ScreenHubTests(unittest.TestCase):
     def test_hidden_widget_lease_stops_only_its_owned_child_and_preserves_last_frame(self):
         unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
-            with patch("wda_screen.FRAME_LEASE_SECONDS", .2), patch.object(self.hub, "_command", return_value=self.pipe_command(jpeg())):
+            with patch("screen.FRAME_LEASE_SECONDS", .2), patch.object(self.hub, "_command", return_value=self.pipe_command(jpeg())):
                 self.hub.frame()
                 eventually(lambda: self.hub._child is not None and self.hub._frame is not None)
                 child = self.hub._child
@@ -157,7 +157,7 @@ class ScreenHubTests(unittest.TestCase):
     def test_latest_jpeg_is_encoded_only_when_requested_and_identical_frames_are_skipped(self):
         stop = threading.Event()
         state = self.hub._read_state()
-        with patch("wda_screen.base64.b64encode", wraps=base64.b64encode) as encode:
+        with patch("screen.base64.b64encode", wraps=base64.b64encode) as encode:
             for index in range(30):
                 self.hub._publish_frame(jpeg(payload=str(index).encode()), 440, 956, stop)
             self.assertEqual(self.hub._seq, 30)
@@ -260,7 +260,7 @@ class ScreenHubTests(unittest.TestCase):
 
     def test_state_file_is_parsed_once_per_change_not_once_per_stream_chunk(self):
         self.hub.set_paused(False)
-        with patch("wda_screen.json.loads", wraps=json.loads) as parse:
+        with patch("screen.json.loads", wraps=json.loads) as parse:
             for _ in range(200):
                 self.assertFalse(self.hub._paused())
                 self.hub._read_state()
@@ -285,84 +285,20 @@ class ScreenHubTests(unittest.TestCase):
         self.assertEqual(state["device"], {"model": "iPhone 17 Pro Max"})
         self.assertFalse(self.hub.paused())
 
-    def test_stream_command_uses_existing_usb_dependencies_and_no_new_install(self):
+    def test_stream_command_is_the_coredevice_helper_and_hides_the_passcode(self):
         (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234", "password": "secret"}))
-        with patch("wda_screen.shutil.which", return_value="/usr/bin/node"), \
-                patch.object(type(self.hub), "_coredevice_python", return_value=None):
-            self.assertIsNone(self.hub._command())
-            dependency = self.directory / "runtime/forward/node_modules/appium-ios-device"
-            dependency.mkdir(parents=True)
+        with patch.object(type(self.hub), "_coredevice_python", return_value="/venv/bin/python"):
             command = self.hub._command()
-            self.assertEqual(command[-2:], ["TEST-DEVICE-1234", "9100"])
-            self.assertEqual(Path(command[1]).read_bytes(), (ROOT / "tooling/screen-stream.mjs").read_bytes())
-            self.assertNotIn("secret", Path(command[1]).read_text())
-            self.assertEqual(os.stat(command[1]).st_mode & 0o777, 0o600)
-        (self.directory / "config.json").write_text('{"udid":"TEST-DEVICE-1234", "mjpeg_device_port":"http://remote"}')
+        self.assertEqual(command, ["/venv/bin/python", str(ROOT / "server" / "coredevice_helper.py"),
+                                   "--stream", "--udid", "TEST-DEVICE-1234",
+                                   "--fps", "10", "--quality", "60", "--scale", "0.5"])
+        self.assertNotIn("secret", " ".join(command))
+        (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234"}))
         with patch.object(type(self.hub), "_coredevice_python", return_value=None):
             self.assertIsNone(self.hub._command())
-
-
-    def test_stream_command_prefers_the_coredevice_helper(self):
-        (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234", "password": "secret"}))
+        (self.directory / "config.json").write_text(json.dumps({"udid": "bad id"}))
         with patch.object(type(self.hub), "_coredevice_python", return_value="/venv/bin/python"):
-            command = self.hub._command()
-        self.assertEqual(command[:2], ["/venv/bin/python", str(ROOT / "server" / "coredevice_helper.py")])
-        self.assertEqual(command[2:4], ["--stream", "--udid"])
-        self.assertEqual(command[4], "TEST-DEVICE-1234")
-        self.assertNotIn("secret", " ".join(command))
-        (self.directory / "config.json").write_text(json.dumps({"udid": "TEST-DEVICE-1234", "stream_backend": "axe"}))
-        with patch.object(type(self.hub), "_coredevice_python", return_value="/venv/bin/python"):
-            self.assertNotEqual(["--stream"], (self.hub._command() or ["--stream"])[2:3])
-
-
-class NodeStreamTests(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("node"), "Node is not installed.")
-    def test_paused_usb_socket_dechunks_binary_body_and_requests_only_stream_root(self):
-        body = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg() + b"\r\n--frame--\r\n"
-        requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def log_message(self, *arguments):
-                pass
-
-            def do_GET(self):
-                requests.append(self.path)
-                self.send_response(200)
-                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
-                for offset in range(0, len(body), 7):
-                    chunk = body[offset:offset + 7]
-                    self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            with tempfile.TemporaryDirectory() as temporary:
-                runtime = Path(temporary)
-                script = runtime / "screen-stream.mjs"
-                script.write_bytes((ROOT / "tooling/screen-stream.mjs").read_bytes())
-                stub = runtime / "node_modules/appium-ios-device"
-                stub.mkdir(parents=True)
-                (stub / "package.json").write_text('{"type":"module","main":"index.js"}')
-                # appium-ios-device returns the socket paused after unpiping its
-                # usbmux plist reader. A fresh, flowing TCP fixture hides this.
-                (stub / "index.js").write_text("import net from 'node:net'; export default {utilities:{connectPort: async () => "
-                                               f"net.connect({server.server_port}, '127.0.0.1').pause()" + "}};")
-                result = subprocess.run([shutil.which("node"), str(script), "TEST-DEVICE-1234", "9100"],
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-                self.assertEqual(result.stdout, body)
-                self.assertEqual(result.stderr, b"")
-                self.assertEqual(requests, ["/"])
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+            self.assertIsNone(self.hub._command())
 
 
 if __name__ == "__main__":

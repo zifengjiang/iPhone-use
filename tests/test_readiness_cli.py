@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 import iphone_use
-from wda_client import WDAError
+from errors import PUAError
 
 spec = importlib.util.spec_from_file_location("readiness_smoke", ROOT / "scripts" / "smoke_mcp.py")
 smoke = importlib.util.module_from_spec(spec)
@@ -79,7 +79,7 @@ class ReadinessCLITests(unittest.TestCase):
         self.assertEqual(result, data)
 
     def test_server_cli_real_failure_still_returns_error_and_one(self):
-        status, result = self.server_main(error=WDAError("phone_locked", "Unlock the phone"))
+        status, result = self.server_main(error=PUAError("phone_locked", "Unlock the phone"))
         self.assertEqual(status, 1)
         self.assertEqual(result["error"]["code"], "phone_locked")
 

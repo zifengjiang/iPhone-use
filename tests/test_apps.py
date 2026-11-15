@@ -10,7 +10,7 @@ from unittest.mock import patch
 import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
-import wda_apps
+import apps
 
 
 class FakeSetup:
@@ -23,7 +23,7 @@ class AppTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.setup = FakeSetup()
         self.setup.config = {}
-        self.catalog = wda_apps.AppCatalog(Path(self.temp.name), self.setup)
+        self.catalog = apps.AppCatalog(Path(self.temp.name), self.setup)
 
     @staticmethod
     def apple():
@@ -34,7 +34,7 @@ class AppTests(unittest.TestCase):
              "trackName": "掌上生活-招商银行信用卡", "artistName": "招商银行"}]}
 
     def test_catalog_exact_alias_and_case_preserving_bundle(self):
-        with patch.object(wda_apps, "fetch_apple", side_effect=AssertionError("must stay offline")), patch.object(wda_apps.subprocess, "run", side_effect=AssertionError("must stay offline")):
+        with patch.object(apps, "fetch_apple", side_effect=AssertionError("must stay offline")), patch.object(apps.subprocess, "run", side_effect=AssertionError("must stay offline")):
             result = self.catalog.lookup("cmb", source="catalog", limit=1)
         self.assertTrue(result["ok"])
         self.assertEqual(result["candidates"][0]["bundle_id"], "com.cmbchina.MPBBank")
@@ -48,28 +48,28 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.catalog.lookup("unknown app 999", source="catalog")["candidates"], [])
 
     def test_catalog_has_evidence_for_every_reviewed_app(self):
-        doc = json.loads(wda_apps.CATALOG_PATH.read_text())
+        doc = json.loads(apps.CATALOG_PATH.read_text())
         bundles = [row["bundleId"] for row in doc["apps"]]
         self.assertEqual(len(bundles), len(set(bundles)))
         self.assertGreaterEqual(len(bundles), 25)
         for row in doc["apps"]:
-            self.assertTrue(wda_apps._valid_bundle(row["bundleId"]))
-            self.assertTrue(wda_apps._api_url(row["sourceUrl"]))
+            self.assertTrue(apps._valid_bundle(row["bundleId"]))
+            self.assertTrue(apps._api_url(row["sourceUrl"]))
             self.assertTrue(row["verifiedAt"])
             self.assertTrue(row["publisher"])
             self.assertTrue(row["aliases"])
 
     def test_parse_device_formats_and_invalid_entries(self):
-        rows = wda_apps.AppCatalog.parse_installed({"result": {"apps": [
+        rows = apps.AppCatalog.parse_installed({"result": {"apps": [
             {"name": "招商银行", "bundleIdentifier": "com.cmbchina.MPBBank"},
             {"displayName": "掌上生活", "bundleId": "com.cmbchina.cmblife"},
             {"name": "duplicate", "bundleID": "com.cmbchina.MPBBank"},
             {"name": "malformed", "bundleIdentifier": "../not-a-bundle"}, None]}})
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["installed_verified"] for row in rows))
-        self.assertEqual(wda_apps.AppCatalog.parse_installed({"result": {"installedApps": {
+        self.assertEqual(apps.AppCatalog.parse_installed({"result": {"installedApps": {
             "com.example.app": {"displayName": "Example"}}}})[0]["bundle_id"], "com.example.app")
-        self.assertEqual(wda_apps.AppCatalog.parse_installed({}), [])
+        self.assertEqual(apps.AppCatalog.parse_installed({}), [])
 
     def _run_device(self, argv, **kwargs):
         self.assertIsInstance(argv, list)
@@ -83,7 +83,7 @@ class AppTests(unittest.TestCase):
 
     def test_auto_prioritises_installed_and_caches_privately(self):
         self.setup.config = {"udid": "00008150-ABCDEF0123456789"}
-        with patch.object(wda_apps.subprocess, "run", side_effect=self._run_device) as run, patch.object(wda_apps, "fetch_apple", side_effect=AssertionError("metadata already found")):
+        with patch.object(apps.subprocess, "run", side_effect=self._run_device) as run, patch.object(apps, "fetch_apple", side_effect=AssertionError("metadata already found")):
             result = self.catalog.lookup("CMB")
             again = self.catalog.lookup("招行")
         self.assertEqual(run.call_count, 1)
@@ -99,7 +99,7 @@ class AppTests(unittest.TestCase):
 
     def test_cache_expiry_and_device_change_refresh_inventory(self):
         self.setup.config = {"udid": "00008150-ABCDEF0123456789"}
-        with patch.object(wda_apps.subprocess, "run", side_effect=self._run_device) as run:
+        with patch.object(apps.subprocess, "run", side_effect=self._run_device) as run:
             self.catalog.lookup("招商银行", source="installed")
             cache_path = Path(self.temp.name) / "apps-installed-cache.json"
             cache = json.loads(cache_path.read_text())
@@ -111,7 +111,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
 
     def test_missing_device_and_invalid_udid_are_actionable_without_commands(self):
-        with patch.object(wda_apps.subprocess, "run", side_effect=AssertionError("must not run")):
+        with patch.object(apps.subprocess, "run", side_effect=AssertionError("must not run")):
             result = self.catalog.lookup("招商银行", source="installed")
             self.setup.config = {"udid": "$(touch /tmp/unsafe)"}
             invalid = self.catalog.lookup("招商银行", source="installed")
@@ -121,7 +121,7 @@ class AppTests(unittest.TestCase):
 
     def test_failed_installed_probe_does_not_claim_catalog_app_installed(self):
         self.setup.config = {"udid": "00008150-ABCDEF0123456789"}
-        with patch.object(wda_apps.subprocess, "run", side_effect=OSError("missing xcrun")):
+        with patch.object(apps.subprocess, "run", side_effect=OSError("missing xcrun")):
             result = self.catalog.lookup("招商银行")
         self.assertTrue(result["ok"])
         self.assertFalse(result["candidates"][0]["installation_checked"])
@@ -132,14 +132,14 @@ class AppTests(unittest.TestCase):
         doc = self.apple()
         doc["results"].extend([doc["results"][0], None, {"bundleId": "com.fake.app", "trackId": True, "trackName": "Fake"},
                                {"kind": "song", "bundleId": "com.fake.song", "trackId": 1, "trackName": "Song"}])
-        rows = wda_apps.parse_apple(doc, "cn", "https://itunes.apple.com/lookup?id=392899425")
+        rows = apps.parse_apple(doc, "cn", "https://itunes.apple.com/lookup?id=392899425")
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["bundle_id"], "com.cmbchina.MPBBank")
         self.assertEqual(rows[0]["publisher"], "招商银行")
 
     def test_apple_query_escaping_cache_and_no_device_metadata_transmission(self):
         query = "招聘 & country=us $(anything)"
-        with patch.object(wda_apps, "fetch_apple", return_value=self.apple()) as fetch:
+        with patch.object(apps, "fetch_apple", return_value=self.apple()) as fetch:
             result = self.catalog.lookup(query, source="apple", limit=3)
             self.catalog.lookup(query, source="apple", limit=3)
         self.assertEqual(fetch.call_count, 1)
@@ -151,14 +151,14 @@ class AppTests(unittest.TestCase):
         self.assertEqual(os.stat(Path(self.temp.name) / "apps-apple-cache.json").st_mode & 0o777, 0o600)
 
     def test_auto_unknown_app_uses_apple_once(self):
-        with patch.object(wda_apps, "fetch_apple", return_value=self.apple()) as fetch:
+        with patch.object(apps, "fetch_apple", return_value=self.apple()) as fetch:
             result = self.catalog.lookup("未知名称")
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(result["searched_sources"], ["installed", "catalog", "apple"])
 
     def test_apple_rate_limit_does_not_make_another_request(self):
         (Path(self.temp.name) / "apps-apple-request-times.json").write_text(json.dumps([time.time()] * 18))
-        with patch.object(wda_apps, "fetch_apple", side_effect=AssertionError("must not request")):
+        with patch.object(apps, "fetch_apple", side_effect=AssertionError("must not request")):
             result = self.catalog.lookup("招商银行", source="apple")
         self.assertFalse(result["ok"])
         self.assertIn("budget", result["warnings"][0])
@@ -169,16 +169,16 @@ class AppTests(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertTrue(result_content(missing)["isError"])
         self.assertEqual(missing["error"]["code"], "app_lookup_unavailable")
-        with patch.object(wda_apps, "fetch_apple", side_effect=OSError("offline")):
+        with patch.object(apps, "fetch_apple", side_effect=OSError("offline")):
             failed = self.catalog.lookup("A missing app", source="apple")
         self.assertTrue(result_content(failed)["isError"])
         self.assertFalse(failed["error"]["uncertain"])
-        with patch.object(wda_apps, "fetch_apple", return_value={"results": []}):
+        with patch.object(apps, "fetch_apple", return_value={"results": []}):
             empty = self.catalog.lookup("Different absent app", source="apple")
         self.assertTrue(empty["ok"])
         self.assertFalse(result_content(empty)["isError"])
         self.assertEqual(empty["candidates"], [])
-        with patch.object(wda_apps, "fetch_apple", return_value={"results": []}):
+        with patch.object(apps, "fetch_apple", return_value={"results": []}):
             auto_empty = self.catalog.lookup("Auto absent app", source="auto")
         self.assertTrue(auto_empty["ok"])
         self.assertFalse(result_content(auto_empty)["isError"])
@@ -189,9 +189,9 @@ class AppTests(unittest.TestCase):
         for url in ("http://itunes.apple.com/search", "https://example.com/search", "https://itunes.apple.com.evil.test/search",
                     "https://user:password@itunes.apple.com/search", "https://itunes.apple.com/search#fragment"):
             with self.assertRaises(ValueError):
-                wda_apps.fetch_apple(url)
+                apps.fetch_apple(url)
         with self.assertRaises(ValueError):
-            wda_apps._AppleRedirects().redirect_request(None, None, 302, "", {}, "https://example.com/search")
+            apps._AppleRedirects().redirect_request(None, None, 302, "", {}, "https://example.com/search")
 
     def test_input_bounds(self):
         for kwargs in ({"query": ""}, {"query": "x" * 101}, {"query": "x", "country": "china"},
@@ -203,7 +203,7 @@ class AppTests(unittest.TestCase):
         root.mkdir()
         (root / ".git").mkdir()
         with self.assertRaises(ValueError):
-            wda_apps.AppCatalog(root / "state", self.setup)
+            apps.AppCatalog(root / "state", self.setup)
 
 
 if __name__ == "__main__":

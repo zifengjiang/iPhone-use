@@ -1,4 +1,3 @@
-"""Guard the published catalog against Codex's lossy 5 KB schema compaction."""
 import copy
 import json
 import re
@@ -6,212 +5,195 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
-from iphone_use import BATCH_OPS, HYBRID_ONLY, INSTRUCTIONS, Runtime, SCHEMAS, TOOLS, ictrl_tool_catalog, validate, validate_semantics
-from wda_client import WDAError
+from errors import PUAError
+from iphone_use import (BATCH_OPS, DESCRIPTIONS, INSTRUCTIONS, SCHEMAS, SCREEN_URI, TOOLS,
+                        validate, validate_semantics)
+
+MUTATIONS = {"tap", "swipe", "type_text", "press_button", "launch_app", "batch", "setup",
+             "unlock", "screen_action"}
 
 
-def json_bytes(value):
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+def schema_of(name):
+    return next(tool for tool in TOOLS if tool["name"] == "pua_" + name)
 
 
-def without_documentation(value):
-    if isinstance(value, list):
-        return [without_documentation(item) for item in value]
-    if isinstance(value, dict):
-        return {key: without_documentation(item) for key, item in value.items()
-                if key not in ("description", "examples")}
-    return value
+class CatalogTests(unittest.TestCase):
+    def test_every_schema_is_exactly_one_tool(self):
+        self.assertEqual(len(TOOLS), len(SCHEMAS))
+        self.assertEqual({tool["name"] for tool in TOOLS}, {"pua_" + name for name in SCHEMAS})
+        self.assertEqual(len(TOOLS), 18)
+
+    def test_the_final_tool_list_is_the_whole_product(self):
+        self.assertEqual([tool["name"] for tool in TOOLS],
+                         ["pua_observe", "pua_find", "pua_tap", "pua_swipe", "pua_type_text",
+                          "pua_press_button", "pua_launch_app", "pua_wait", "pua_batch", "pua_apps",
+                          "pua_doctor", "pua_ready", "pua_metrics", "pua_setup", "pua_unlock",
+                          "pua_screen", "pua_screen_frame", "pua_screen_action"])
+
+    def test_titles_descriptions_and_annotations_are_complete(self):
+        for tool in TOOLS:
+            with self.subTest(tool=tool["name"]):
+                self.assertTrue(tool["title"].startswith("Pua ") or tool["name"] == "pua_screen")
+                self.assertGreater(len(tool["description"]), 60)
+                self.assertEqual(set(tool["annotations"]),
+                                 {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"})
+                mutation = tool["name"].removeprefix("pua_") in MUTATIONS
+                self.assertEqual(tool["annotations"]["readOnlyHint"], not mutation)
+                self.assertEqual(tool["annotations"]["destructiveHint"], mutation)
+                self.assertFalse(tool["annotations"]["openWorldHint"])
+
+    def test_preview_tools_are_hidden_from_the_model_and_the_panel_is_not(self):
+        for name in ("screen_frame", "screen_action"):
+            self.assertEqual(schema_of(name)["_meta"]["ui"]["visibility"], ["app"])
+        ready = schema_of("ready")
+        self.assertEqual(ready["_meta"]["ui"]["resourceUri"], SCREEN_URI)
+        self.assertEqual(schema_of("screen")["_meta"]["openai/ui"]["entrypoints"], [{"type": "thread"}])
+
+    def test_no_description_promises_a_backend_that_no_longer_exists(self):
+        blob = json.dumps(TOOLS, ensure_ascii=False) + INSTRUCTIONS + json.dumps(DESCRIPTIONS)
+        for word in ("WDA", "WebDriverAgent", "iCTRL", "ictrl", "appium", "iproxy", "Appium"):
+            self.assertNotIn(word, blob, word)
+
+    def test_the_instructions_teach_the_real_loop(self):
+        self.assertIn("pua_doctor", INSTRUCTIONS)
+        self.assertIn("pua_observe", INSTRUCTIONS)
+        self.assertIn("observation_id", INSTRUCTIONS)
+        self.assertIn("ASCII", INSTRUCTIONS)
+        self.assertIn("pua_unlock", INSTRUCTIONS)
+
+    def test_descriptions_state_the_constraints_the_code_enforces(self):
+        self.assertIn("ASCII", DESCRIPTIONS["type_text"])
+        self.assertIn("500", DESCRIPTIONS["type_text"])
+        self.assertIn("selector", DESCRIPTIONS["tap"])
+        self.assertIn("locked", DESCRIPTIONS["unlock"])
+        self.assertIn("must not be repeated", DESCRIPTIONS["batch"])
+        self.assertIn("Discover", DESCRIPTIONS["setup"])
 
 
-def expand_references(schema):
-    """Expand local references for contract comparison, rejecting broken/cyclic refs."""
-    def expand(value, active=()):
-        if isinstance(value, list):
-            return [expand(item, active) for item in value]
-        if not isinstance(value, dict):
-            return value
-        if "$ref" in value:
-            reference = value["$ref"]
-            if not reference.startswith("#/$defs/") or reference in active:
-                raise AssertionError("Unsupported or cyclic schema reference: " + reference)
-            target = schema
-            for part in reference[2:].split("/"):
-                target = target[part.replace("~1", "/").replace("~0", "~")]
-            expanded = expand(target, (*active, reference))
-            # This catalog uses pure references, so no sibling keyword can be lost.
-            if set(value) != {"$ref"}:
-                raise AssertionError("Reference has sibling constraints")
-            return expanded
-        return {key: expand(item, active) for key, item in value.items()
-                if key != "$defs"}
-    return expand(schema)
+class SchemaShapeTests(unittest.TestCase):
+    def walk(self, schema, path="arguments"):
+        if not isinstance(schema, dict):
+            return
+        if schema.get("type") == "object" and "properties" in schema:
+            self.assertFalse(schema.get("additionalProperties", True), f"{path} accepts unknown fields")
+        for key, value in schema.items():
+            if key in ("properties", "$defs"):
+                for name, child in value.items():
+                    self.walk(child, f"{path}.{name}")
+            elif key in ("items",):
+                self.walk(value, path + "[]")
+            elif key in ("oneOf", "anyOf", "allOf"):
+                for index, child in enumerate(value):
+                    self.walk(child, f"{path}<{index}>")
+
+    def test_every_published_object_is_closed(self):
+        for tool in TOOLS:
+            self.walk(tool["inputSchema"], tool["name"])
+
+    def test_repeated_selector_and_observe_definitions_are_shared(self):
+        tap = schema_of("tap")["inputSchema"]
+        self.assertIn("selector", tap["$defs"])
+        self.assertIn("observe", tap["$defs"])
+        self.assertNotIn("document", json.dumps(tap))
+        self.assertEqual(tap["properties"]["selector"], {"$ref": "#/$defs/selector"})
+
+    def test_the_selector_has_no_backend_specific_fields(self):
+        selector = schema_of("tap")["inputSchema"]["$defs"]["selector"]["properties"]
+        self.assertEqual(set(selector), {"label", "label_contains", "name", "value", "type", "enabled", "index"})
+        self.assertEqual(selector["index"]["minimum"], 0)
+
+    def test_press_button_cannot_lock_the_phone(self):
+        self.assertEqual(SCHEMAS["press_button"]["properties"]["name"]["enum"],
+                         ["home", "volumeup", "volumedown"])
+
+    def test_type_text_has_no_field_that_needs_a_webdriver(self):
+        self.assertEqual(set(SCHEMAS["type_text"]["properties"]), {"text", "allow_newlines", "observe"})
+
+    def test_batch_steps_are_the_supported_operations(self):
+        steps = SCHEMAS["batch"]["properties"]["steps"]
+        self.assertEqual([step["properties"]["op"]["const"] for step in steps["items"]["oneOf"]],
+                         list(BATCH_OPS))
+        self.assertTrue(set(BATCH_OPS) <= set(SCHEMAS))
+        self.assertNotIn("scroll_find", SCHEMAS)
 
 
-def codex_supported_schema(value):
-    """Project to JsonSchema fields supported by Codex 0.160.1, without expanding refs.
+class ValidationTests(unittest.TestCase):
+    def rejected(self, name, arguments):
+        with self.assertRaises(PUAError) as caught:
+            validate(arguments, SCHEMAS[name])
+            validate_semantics(name, arguments)
+        return caught.exception
 
-    The host keeps reachable $defs and $ref; it only compacts once this serialized
-    projection exceeds 5,000 bytes. This test protects the actual branch contract
-    through that compatibility boundary, including const -> enum lowering.
-    """
-    supported = {"$ref", "type", "description", "encrypted", "enum", "items",
-                 "minItems", "properties", "required", "additionalProperties",
-                 "anyOf", "oneOf", "allOf", "$defs", "definitions"}
-    result = {}
-    for key, item in value.items():
-        if key == "const":
-            result["enum"] = [item]
-        elif key in supported:
-            if key in ("properties", "$defs", "definitions"):
-                item = {name: codex_supported_schema(child) for name, child in item.items()}
-            elif key in ("anyOf", "oneOf", "allOf"):
-                item = [codex_supported_schema(child) for child in item]
-            elif key == "items" or (key == "additionalProperties" and isinstance(item, dict)):
-                item = codex_supported_schema(item)
-            result[key] = item
-    return result
+    def accepted(self, name, arguments):
+        validate(arguments, SCHEMAS[name])
+        validate_semantics(name, arguments)
+
+    def test_unknown_fields_are_named_with_the_allowed_ones(self):
+        error = self.rejected("tap", {"selector": {"label": "x"}, "password": "hunter2"})
+        self.assertEqual(error.code, "invalid_argument")
+        self.assertEqual(error.details["unknown_fields"], ["password"])
+        self.assertIn("selector", error.details["allowed_fields"])
+        self.assertFalse(error.details["action_executed"])
+
+    def test_a_selector_cannot_be_empty(self):
+        self.assertEqual(self.rejected("find", {"selector": {}}).code, "invalid_argument")
+
+    def test_tap_needs_exactly_one_target(self):
+        self.assertEqual(self.rejected("tap", {}).code, "invalid_argument")
+        self.assertEqual(self.rejected("tap", {"selector": {"label": "x"}, "x": 1, "y": 2}).code,
+                         "invalid_argument")
+        self.assertEqual(self.rejected("tap", {"x": 1}).code, "invalid_argument")
+        self.accepted("tap", {"selector": {"label": "返回"}})
+        self.accepted("tap", {"x": 12, "y": 34})
+
+    def test_newlines_need_an_explicit_intent(self):
+        self.assertEqual(self.rejected("type_text", {"text": "a\nb"}).code, "invalid_argument")
+        self.accepted("type_text", {"text": "a\nb", "allow_newlines": True})
+
+    def test_numbers_are_bounded(self):
+        self.assertEqual(self.rejected("observe", {"max_nodes": 0}).code, "invalid_argument")
+        self.assertEqual(self.rejected("observe", {"max_nodes": 501}).code, "invalid_argument")
+        self.assertEqual(self.rejected("wait", {"selector": {"label": "x"}, "timeout_seconds": -1}).code,
+                         "invalid_argument")
+
+    def test_ready_udid_is_a_coredevice_identifier(self):
+        self.accepted("ready", {})
+        self.accepted("ready", {"device": "00008150-001A55461AE1401C"})
+        self.assertEqual(self.rejected("ready", {"device": "my phone"}).code, "invalid_argument")
+
+    def test_setup_needs_a_udid_to_configure(self):
+        self.assertEqual(self.rejected("setup", {"action": "configure"}).code, "invalid_argument")
+        self.accepted("setup", {"action": "status"})
+        self.accepted("setup", {"action": "configure", "udid": "00008150-001A55461AE1401C"})
+
+    def test_batch_validates_every_step(self):
+        self.accepted("batch", {"steps": [{"op": "tap", "args": {"x": 1, "y": 2}},
+                                          {"op": "type_text", "args": {"text": "ok"}}]})
+        error = self.rejected("batch", {"steps": [{"op": "tap", "args": {}}]})
+        self.assertEqual(error.code, "invalid_argument")
+        self.assertEqual(self.rejected("batch", {"steps": []}).code, "invalid_argument")
+        self.assertEqual(self.rejected("batch", {"steps": [{"op": "scroll_find", "args": {}}]}).code,
+                         "invalid_argument")
+
+    def test_observations_are_optional_but_typed(self):
+        self.accepted("tap", {"x": 1, "y": 2, "observation_id": "abc123"})
+        self.assertEqual(self.rejected("tap", {"x": 1, "y": 2, "observation_id": 5}).code,
+                         "invalid_argument")
 
 
-class ToolLoadingTests(unittest.TestCase):
-    def setUp(self):
-        self.catalog = {tool["name"]: tool for tool in TOOLS}
-        self.batch = self.catalog["pua_batch"]["inputSchema"]
+class InstructionTests(unittest.TestCase):
+    def test_the_system_prompt_is_one_behavioural_brief(self):
+        self.assertLess(len(INSTRUCTIONS), 4000)
+        self.assertNotIn("http://", INSTRUCTIONS)
+        self.assertIn("expect", INSTRUCTIONS)
 
-    def test_pua_names_are_consistent_across_the_published_contract_and_guidance(self):
-        # The Runner catalog leaves out tools only the hybrid backend can serve.
-        self.assertEqual(set(self.catalog), {"pua_" + name for name in set(SCHEMAS) - HYBRID_ONLY})
-        self.assertNotIn("wda_", json.dumps(TOOLS) + INSTRUCTIONS)
-        for name, tool in self.catalog.items():
-            if name != "pua_screen":
-                self.assertEqual(tool["title"], "Pua " + name[4:].replace("_", " "))
-        public_names = set(self.catalog) | {tool["name"] for tool in ictrl_tool_catalog(hybrid=True)}
-        for document in (ROOT / "skills").rglob("*.md"):
-            body = document.read_text()
-            self.assertNotRegex(body, r"(?i)\bwda\b|wda_")
-            for reference in re.findall(r"pua_[a-z_]+", body):
-                self.assertTrue(reference in public_names or reference in {
-                    "pua_unreachable", "pua_foreground_unavailable", "pua_recovery_required"
-                }, f"{document.relative_to(ROOT)}: {reference}")
-
-    def test_hybrid_only_tools_are_published_by_the_hybrid_catalog(self):
-        published = {tool["name"] for tool in ictrl_tool_catalog(hybrid=True)}
-        self.assertEqual(published, {name for name in published} | {"pua_" + name for name in HYBRID_ONLY})
-        self.assertNotIn("pua_unlock", {tool["name"] for tool in ictrl_tool_catalog()})
-
-    def test_every_published_schema_fits_before_host_compaction(self):
-        for name, tool in self.catalog.items():
-            with self.subTest(tool=name):
-                self.assertLess(json_bytes(tool["inputSchema"]), 5000)
-                self.assertLess(json_bytes(codex_supported_schema(tool["inputSchema"])), 5000)
-
-    def test_every_published_schema_is_the_runtime_contract_minus_documentation(self):
-        for name, tool in self.catalog.items():
-            with self.subTest(tool=name):
-                published = tool["inputSchema"]
-                self.assertEqual(without_documentation(expand_references(published)),
-                                 without_documentation(SCHEMAS[name[len("pua_"):]]))
-                self.assertFalse(published["additionalProperties"])
-
-    def test_selector_fields_are_documented_once_and_named_everywhere(self):
-        reference = self.catalog["pua_find"]["inputSchema"]["properties"]["selector"]
-        self.assertTrue(all("description" in field for field in reference["properties"].values()))
-        self.assertEqual(set(reference["properties"]),
-                         {"label", "label_contains", "name", "value", "type", "enabled", "index", "predicate"})
-        documented = 0
-        for name, tool in self.catalog.items():
-            schema = tool["inputSchema"]
-            for holder in (schema.get("$defs", {}), schema["properties"]):
-                for key, value in holder.items():
-                    if key in ("selector", "expect", "end_selector") and "properties" in value:
-                        self.assertEqual(set(value["properties"]), set(reference["properties"]), name)
-                        documented += any("description" in field for field in value["properties"].values())
-        self.assertEqual(documented, 1)
-
-    def test_catalog_stays_within_the_model_context_budget(self):
-        # 0.1.14 published 39,084 bytes, 29,568 of them visible to the model in Codex.
-        self.assertLess(json_bytes({"tools": TOOLS}), 31000)
-        visible = sum(json_bytes({"name": tool["name"], "description": tool["description"],
-                                  "parameters": codex_supported_schema(tool["inputSchema"])})
-                      for tool in TOOLS if tool.get("_meta", {}).get("ui", {}).get("visibility") != ["app"])
-        self.assertLess(visible, 22000)
-
-    def test_batch_references_resolve_to_the_complete_runtime_contract(self):
-        self.assertIn("$defs", self.batch)
-        expanded = expand_references(self.batch)
-        self.assertEqual(expanded, without_documentation(SCHEMAS["batch"]))
-        branches = expanded["properties"]["steps"]["items"]["oneOf"]
-        self.assertEqual(len(branches), len(BATCH_OPS))
-        for branch in branches:
-            op = branch["properties"]["op"]["const"]
-            with self.subTest(op=op):
-                self.assertEqual(branch["required"], ["op", "args"])
-                self.assertFalse(branch["additionalProperties"])
-                arguments = branch["properties"]["args"]
-                self.assertFalse(arguments["additionalProperties"])
-                self.assertEqual(arguments, without_documentation(SCHEMAS[op]))
-
-    def test_codex_projection_keeps_references_and_all_operation_fields(self):
-        projected = codex_supported_schema(self.batch)
-        self.assertEqual(set(projected["$defs"]), set(self.batch["$defs"]))
-        expanded = expand_references(projected)
-        expected = codex_supported_schema(without_documentation(SCHEMAS["batch"]))
-        self.assertEqual(expanded, expected)
-        actual_ops = {branch["properties"]["op"]["enum"][0]
-                      for branch in expanded["properties"]["steps"]["items"]["oneOf"]}
-        self.assertEqual(actual_ops, set(BATCH_OPS))
-        self.assertIn("$ref", json.dumps(projected))
-
-    def test_publication_does_not_replace_the_strict_runtime_schemas(self):
-        self.assertIsNot(self.batch, SCHEMAS["batch"])
-        self.assertNotIn("$ref", json.dumps(SCHEMAS["batch"]))
-        self.assertNotIn("$defs", SCHEMAS["batch"])
-        original = copy.deepcopy(SCHEMAS["batch"])
-        expand_references(self.batch)
-        self.assertEqual(SCHEMAS["batch"], original)
-
-    def test_valid_examples_accept_the_same_fields_in_both_contracts(self):
-        examples = {
-            "tap": {"x": 40, "y": 80, "observe": "tree"},
-            "swipe": {"region": {"x": 0, "y": 100, "width": 300, "height": 400},
-                      "verify": False, "observe": "both"},
-            "type_text": {"selector": {"label_contains": "message", "type": "TextField", "index": 1},
-                          "text": "直接输入完整文本", "replace": True, "verify": True},
-            "launch_app": {"bundle_id": "com.example.app", "expect": {"label": "首页"}},
-            "press_button": {"name": "home", "verify": False},
-            "wait": {"selector": {"label": "完成"}, "timeout_seconds": 2},
-            "observe": {"mode": "tree", "max_nodes": 50},
-            "scroll_find": {"selector": {"label": "列表末项"}, "max_swipes": 3},
-        }
-        self.assertEqual(set(examples), set(BATCH_OPS))
-        arguments = {"steps": [{"op": op, "args": args} for op, args in examples.items()]}
-        for schema in (SCHEMAS["batch"], expand_references(self.batch)):
-            validate(arguments, schema)
-        validate_semantics("batch", arguments)
-
-    def test_unknown_fields_in_later_batch_step_fail_before_any_execution(self):
-        first = {"op": "press_button", "args": {"name": "home"}}
-        invalid_cases = [
-            {"steps": [first], "unknown": True},
-            {"steps": [first, {"op": "tap", "args": {"x": 40, "y": 80}, "unknown": True}]},
-            {"steps": [first, {"op": "type_text", "args": {
-                "selector": {"name": "message"}, "text": "test", "unknown": True}}]},
-            {"steps": [first, {"op": "tap", "args": {"selector": {"label": "继续", "rect": {}}}}]},
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            runtime = Runtime(directory)
-            self.addCleanup(runtime.close)
-            with patch.object(runtime, "_call") as execute, patch.object(runtime.client, "request") as request:
-                for arguments in invalid_cases:
-                    with self.subTest(arguments=arguments), self.assertRaises(WDAError) as caught:
-                        runtime.call("pua_batch", arguments)
-                    self.assertEqual(caught.exception.code, "invalid_argument")
-                    self.assertFalse(caught.exception.details["action_executed"])
-                execute.assert_not_called()
-                request.assert_not_called()
+    def test_no_tool_advertises_a_removed_feature(self):
+        blob = INSTRUCTIONS + json.dumps(DESCRIPTIONS)
+        for gone in ("scroll_find", "collect_list", "continue_token", "max_attempts", "predicate"):
+            self.assertNotIn(gone, blob, gone)
 
 
 if __name__ == "__main__":

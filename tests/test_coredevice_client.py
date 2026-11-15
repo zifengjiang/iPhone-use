@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 import coredevice_client
 from coredevice_client import CoreDeviceClient
-from wda_client import WDAError
+from errors import PUAError
 
 STUB = textwrap.dedent(
     """
@@ -51,14 +51,14 @@ class CoreDeviceClientTests(unittest.TestCase):
         self.assertEqual(second["op"], "info")
         self.assertIsNotNone(self.client.process)
 
-    def test_helper_error_becomes_a_wda_error(self):
-        with self.assertRaises(WDAError) as caught:
+    def test_helper_error_becomes_a_pua_error(self):
+        with self.assertRaises(PUAError) as caught:
             self.client.call("boom")
         self.assertEqual(caught.exception.code, "coredevice_failed")
         self.assertIn("device said no", str(caught.exception))
 
     def test_timeout_is_reported_as_uncertain_for_actions(self):
-        with self.assertRaises(WDAError) as caught:
+        with self.assertRaises(PUAError) as caught:
             self.client.call("slow")
         self.assertEqual(caught.exception.code, "coredevice_timeout")
         self.assertTrue(caught.exception.uncertain)
@@ -66,7 +66,7 @@ class CoreDeviceClientTests(unittest.TestCase):
     def test_missing_interpreter_degrades_instead_of_crashing(self):
         broken = CoreDeviceClient(state_dir=self.state, python=str(self.state / "nope"), timeout=1)
         self.assertFalse(broken.available())
-        with self.assertRaises(WDAError) as caught:
+        with self.assertRaises(PUAError) as caught:
             broken.call("info")
         self.assertEqual(caught.exception.code, "coredevice_unavailable")
 

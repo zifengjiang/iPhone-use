@@ -2,8 +2,7 @@
 
 The helper owns the tunnel and the HID stream, so the expensive part of
 CoreDevice happens once per session instead of once per call. Nothing here can
-run without an interpreter that has pymobiledevice3 installed; when that is
-missing the hybrid backend simply keeps using iCTRL.
+run without an interpreter that has pymobiledevice3 installed.
 """
 import json
 import os
@@ -12,17 +11,18 @@ import subprocess
 import threading
 from pathlib import Path
 
-from wda_client import WDAError
+from errors import PUAError
 
 HELPER = Path(__file__).with_name("coredevice_helper.py")
 DEFAULT_PYTHON = Path.home() / ".local/share/iphone-use-coredevice/venv/bin/python"
+DEFAULT_STATE = Path.home() / ".local/share/iphone-use"
 FAILURE_CODES = {"coredevice_unavailable", "coredevice_failed", "coredevice_timeout"}
 
 
 class CoreDeviceClient:
     def __init__(self, udid=None, state_dir=None, python=None, timeout=25.0):
         self.udid = udid or os.environ.get("IPHONE_USE_COREDEVICE_UDID") or None
-        self.state_dir = Path(state_dir).expanduser() if state_dir else Path.home() / ".local/share/iphone-use-ictrl"
+        self.state_dir = Path(state_dir).expanduser() if state_dir else DEFAULT_STATE
         self.python = python or os.environ.get("IPHONE_USE_COREDEVICE_PYTHON") or str(DEFAULT_PYTHON)
         self.timeout = timeout
         self.process = None
@@ -55,7 +55,7 @@ class CoreDeviceClient:
                                             stderr=self.log, text=True, bufsize=1, env=environment)
         except OSError as error:
             self.process = None
-            raise WDAError("coredevice_unavailable",
+            raise PUAError("coredevice_unavailable",
                            f"The CoreDevice helper could not start ({error}). Set IPHONE_USE_COREDEVICE_PYTHON to an interpreter with pymobiledevice3.") from error
         threading.Thread(target=self._pump, args=(self.process.stdout,), daemon=True).start()
 
@@ -92,7 +92,7 @@ class CoreDeviceClient:
 
     def call(self, op, **args):
         if not self.available():
-            raise WDAError("coredevice_unavailable",
+            raise PUAError("coredevice_unavailable",
                            "CoreDevice needs an interpreter with pymobiledevice3; set IPHONE_USE_COREDEVICE_PYTHON.")
         if self.process is None or self.process.poll() is not None:
             self._stop()
@@ -104,25 +104,25 @@ class CoreDeviceClient:
             self.process.stdin.flush()
         except (OSError, ValueError) as error:
             self._stop()
-            raise WDAError("coredevice_failed", f"The CoreDevice helper stopped before {op}.") from error
+            raise PUAError("coredevice_failed", f"The CoreDevice helper stopped before {op}.") from error
         try:
             line = self.replies.get(timeout=self.timeout)
         except queue.Empty:
             self._stop()
-            raise WDAError("coredevice_timeout",
+            raise PUAError("coredevice_timeout",
                            f"CoreDevice did not answer {op} within {self.timeout:g}s. Observe before repeating an action.",
                            uncertain=op not in ("info", "screenshot")) from None
         if line is None:
             self._stop()
-            raise WDAError("coredevice_failed", f"The CoreDevice helper exited during {op}.")
+            raise PUAError("coredevice_failed", f"The CoreDevice helper exited during {op}.")
         try:
             reply = json.loads(line)
         except ValueError as error:
             self._stop()
-            raise WDAError("coredevice_failed", "The CoreDevice helper returned unreadable output.") from error
+            raise PUAError("coredevice_failed", "The CoreDevice helper returned unreadable output.") from error
         if not reply.get("ok"):
             error = reply.get("error") or {}
-            raise WDAError("coredevice_failed", str(error.get("message") or "CoreDevice failed the request.")[:300],
+            raise PUAError("coredevice_failed", str(error.get("message") or "CoreDevice failed the request.")[:300],
                            uncertain=op not in ("info", "screenshot"))
         return reply.get("result") or {}
 

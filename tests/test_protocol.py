@@ -1,19 +1,22 @@
+import base64
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
-from iphone_use import Runtime, result_content, serve
-from wda_client import WDAError
-from wda_controller import PhoneController
-from test_controller import FakeWDA
+sys.path.insert(0, str(ROOT / "tests"))
+from controller import DeviceController
+from errors import PUAError
+from fake_device import FakeAxe, FakeCore, node, tree
+from iphone_use import Runtime, SCREEN_URI, result_content, serve
 
 
 def payload(result):
@@ -23,507 +26,243 @@ def payload(result):
     return json.loads(result["content"][0]["text"])
 
 
-class ProtocolTests(unittest.TestCase):
+def exchange(requests, state_dir):
+    lines = "".join((json.dumps(item, ensure_ascii=False, allow_nan=False) if not isinstance(item, str) else item) + "\n"
+                    for item in requests)
+    process = subprocess.run([sys.executable, str(ROOT / "server" / "iphone_use.py"), "--state-dir", state_dir],
+                             input=lines, capture_output=True, text=True, encoding="utf-8", timeout=20)
+    assert process.returncode == 0, process.stderr
+    assert process.stderr == "", process.stderr
+    return [json.loads(line) for line in process.stdout.splitlines()]
+
+
+class StdioTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
 
-    def exchange(self, requests, url=None):
-        payload = "".join(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n" if not isinstance(item, str) else item + "\n" for item in requests)
-        command = [sys.executable, str(ROOT / "server" / "iphone_use.py"), "--state-dir", self.directory.name]
-        if url:
-            command.extend(["--url", url])
-        process = subprocess.run(
-            command,
-            input=payload, capture_output=True, text=True, encoding="utf-8", timeout=10)
-        self.assertEqual(process.returncode, 0, process.stderr)
-        self.assertEqual(process.stderr, "")
-        return [json.loads(line) for line in process.stdout.splitlines()]
-
-    def runtime(self):
-        runtime = Runtime(self.directory.name)
-        self.addCleanup(runtime.close)
-        client = FakeWDA()
-        runtime.client = client
-        # Restore a close method for Runtime cleanup; fake transports have no sockets.
-        client.close = lambda: None
-        runtime.phone = PhoneController(client, self.directory.name)
-        return runtime, client
-
-    def serve_ready(self, runtime, arguments):
-        request = {"jsonrpc": "2.0", "id": "ready-state", "method": "tools/call", "params": {
-            "name": "pua_ready", "arguments": arguments}}
-        output = io.StringIO()
-        with patch.object(sys, "stdin", io.StringIO(json.dumps(request) + "\n")), contextlib.redirect_stdout(output):
-            serve(runtime)
-        response = json.loads(output.getvalue())
-        self.assertEqual(response["id"], "ready-state")
-        self.assertNotIn("error", response)
-        result = response["result"]
-        # Compact separators: no padding bytes in the model context.
-        self.assertNotIn('": ', result["content"][0]["text"])
-        payload(result)
-        return result
-
-    def test_ready_diagnostic_and_pending_states_are_normal_mcp_results(self):
-        for pending in (False, True):
-            with self.subTest(pending=pending):
-                runtime, client = self.runtime()
-                manager = Mock()
-                manager.mirroring_running.return_value = False
-                manager.pending_recovery.return_value = {"job_id": "existing-recovery", "state": "restarting"} if pending else None
-                runtime.setup_manager = manager
-                client.app = "local.pid.0"
-                result = self.serve_ready(runtime, {"screenshot": False, "recover": False})
-                self.assertFalse(result["isError"])
-                data = payload(result)
-                self.assertFalse(data["ready"])
-                self.assertEqual(data["state"], "recovering" if pending else "recovery_required")
-                self.assertNotIn("error", data)
-                self.assertNotIn("proof", data)
-                self.assertNotIn("observation", data)
-                self.assertEqual([item["type"] for item in result["content"]], ["text"])
-                manager.recover.assert_not_called()
-                self.assertEqual([path for _, path, _ in client.actions() if path != "/session"], [])
-
-    def test_queued_ready_recovery_is_normal_mcp_progress(self):
-        runtime, client = self.runtime()
-        manager = Mock()
-        manager.pending_recovery.return_value = None
-        manager.recover.return_value = {"ok": True, "job_id": "queued-recovery", "recovery": {"state": "queued"}}
-        runtime.setup_manager = manager
-        client.app = "local.pid.0"
-        result = self.serve_ready(runtime, {"screenshot": False, "recover": True})
-        self.assertFalse(result["isError"])
-        data = payload(result)
-        self.assertFalse(data["ready"])
-        self.assertEqual(data["state"], "recovering")
-        self.assertEqual(data["recovery"]["status_arguments"], {"action": "status", "job_id": "queued-recovery"})
-        self.assertEqual(data["recovery"]["next_arguments"], {"screenshot": False, "recover": True})
-        self.assertNotIn("proof", data)
-        self.assertEqual([item["type"] for item in result["content"]], ["text"])
-        manager.recover.assert_called_once_with()
-
-    def test_ready_refusal_lock_and_unknown_fault_remain_mcp_errors(self):
-        for case, expected in (("owner", "pua_recovery_required"), ("locked", "phone_locked"), ("unknown", "device-fault")):
-            with self.subTest(case=case):
-                runtime, client = self.runtime()
-                manager = Mock()
-                manager.pending_recovery.return_value = None
-                manager.recover.return_value = {"ok": False, "error": "Service ownership could not be proven"}
-                runtime.setup_manager = manager
-                if case == "owner":
-                    client.app = "local.pid.0"
-                elif case == "locked":
-                    client.locked = True
-                else:
-                    client.source = Mock(side_effect=WDAError("device-fault", "Unexpected channel fault"))
-                result = self.serve_ready(runtime, {"screenshot": False})
-                self.assertTrue(result["isError"])
-                self.assertEqual(payload(result)["error"]["code"], expected)
-                self.assertEqual([path for _, path, _ in client.actions() if path != "/session"], [])
-
-    def test_ready_success_keeps_mcp_observation_and_proof(self):
-        runtime, client = self.runtime()
-        with patch.object(runtime.setup_manager, "mirroring_running", return_value=False):
-            result = self.serve_ready(runtime, {"screenshot": False, "recover": False})
-        self.assertFalse(result["isError"])
-        data = payload(result)
-        self.assertTrue(data["ready"])
-        self.assertEqual(data["state"], "ready")
-        self.assertTrue(data["proof"]["foreground_resolved"])
-        self.assertGreater(data["observation"]["total_nodes"], 0)
-
-    def test_stdio_initialization_notifications_ping_and_tool_catalog(self):
-        responses = self.exchange([
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "clientInfo": {"name": "test", "version": "1"}}},
+    def test_handshake_catalog_and_annotations(self):
+        responses = exchange([
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "clientInfo": {"name": "test", "version": "1"}}},
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": "ping", "method": "ping"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
-        ])
+        ], self.directory.name)
         self.assertEqual([response["id"] for response in responses], [1, "ping", 3])
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "iphone-use")
+        self.assertEqual(responses[0]["result"]["serverInfo"], {"name": "iphone-use", "version": "0.3.6"})
+        self.assertIn("pua_doctor", responses[0]["result"]["instructions"])
         self.assertEqual(responses[1]["result"], {})
         tools = responses[2]["result"]["tools"]
-        names = [tool["name"] for tool in tools]
-        self.assertEqual(len(names), 19)
-        self.assertEqual(len(names), len(set(names)))
-        for name in ("pua_ready", "pua_setup", "pua_observe", "pua_tap", "pua_type_text", "pua_batch", "pua_collect_list", "pua_apps"):
-            self.assertIn(name, names)
+        self.assertEqual(len(tools), 18)
+        self.assertEqual(len({tool["name"] for tool in tools}), 18)
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")
             self.assertFalse(tool["inputSchema"]["additionalProperties"])
         apps = next(tool for tool in tools if tool["name"] == "pua_apps")
-        self.assertTrue(apps["annotations"]["readOnlyHint"])
-        self.assertFalse(apps["annotations"]["destructiveHint"])
-        self.assertTrue(apps["annotations"]["idempotentHint"])
+        self.assertEqual(apps["annotations"], {"readOnlyHint": True, "destructiveHint": False,
+                                               "idempotentHint": True, "openWorldHint": False})
         self.assertEqual(apps["inputSchema"]["required"], ["query"])
+        preview = {tool["name"]: tool for tool in tools if tool["name"] in ("pua_screen_frame", "pua_screen_action")}
+        self.assertEqual(set(preview), {"pua_screen_frame", "pua_screen_action"})
+        for tool in preview.values():
+            self.assertEqual(tool["_meta"]["ui"]["visibility"], ["app"])
 
-    def test_action_schema_exposes_optimistic_defaults_and_explicit_checkpoints(self):
-        response = self.exchange([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])[0]
-        tools = {tool["name"]: tool for tool in response["result"]["tools"]}
-        def resolved(schema, prop):
-            value = schema["properties"][prop]
-            return schema["$defs"][value["$ref"].split("/")[-1]] if "$ref" in value else value
-        for name in ("pua_tap", "pua_swipe", "pua_type_text", "pua_press_button", "pua_launch_app"):
-            with self.subTest(name=name):
-                schema = tools[name]["inputSchema"]
-                self.assertEqual(resolved(schema, "observe")["default"], "none")
-                self.assertEqual(set(resolved(schema, "expect")["properties"]), set(resolved(tools["pua_find"]["inputSchema"], "selector")["properties"]))
-                if name != "pua_tap":
-                    self.assertFalse(schema["properties"]["verify"]["default"])
-        for name in ("pua_tap", "pua_swipe"):
-            self.assertNotIn("observation_id", tools[name]["inputSchema"].get("required", []))
-        batch_steps = tools["pua_batch"]["inputSchema"]["properties"]["steps"]["items"]["oneOf"]
-        def contract(value, definitions):
-            if isinstance(value, dict):
-                if "$ref" in value:return contract(definitions[value["$ref"].split("/")[-1]], definitions)
-                return {k:contract(v, definitions) for k,v in value.items() if k not in ("description", "examples", "$defs")}
-            if isinstance(value, list):return [contract(v, definitions) for v in value]
-            return value
-        for step in batch_steps:
-            op = step["properties"]["op"]["const"]
-            standalone = tools["pua_" + op]["inputSchema"]
-            self.assertEqual(contract(step["properties"]["args"], tools["pua_batch"]["inputSchema"]["$defs"]),
-                             contract(standalone, standalone.get("$defs", {})))
+    def test_the_screen_resource_is_the_html_panel(self):
+        responses = exchange([
+            {"jsonrpc": "2.0", "id": 1, "method": "resources/list"},
+            {"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": SCREEN_URI}},
+            {"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": "ui://iphone-use/other.html"}},
+        ], self.directory.name)
+        resources = responses[0]["result"]["resources"]
+        self.assertEqual([item["uri"] for item in resources], [SCREEN_URI])
+        self.assertEqual(resources[0]["mimeType"], "text/html;profile=mcp-app")
+        contents = responses[1]["result"]["contents"]
+        self.assertEqual(contents[0]["uri"], SCREEN_URI)
+        self.assertGreater(len(contents[0]["text"]), 5000)
+        self.assertEqual(responses[2]["error"]["code"], -32602)
 
-    def test_stdio_apps_catalog_returns_public_evidence_without_wda_access(self):
-        responses = self.exchange([
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                "name": "pua_apps", "arguments": {"query": "招商银行", "source": "catalog"}}},
-        ], url="http://127.0.0.1:1")
-        result = responses[0]["result"]
-        self.assertFalse(result["isError"])
+    def test_protocol_faults_are_jsonrpc_errors_and_never_kill_the_server(self):
+        responses = exchange([
+            "{not json",
+            {"jsonrpc": "2.0", "id": 1, "method": "no/such/method"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "pua_nope", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "pua_tap", "arguments": {"selector": {"label": "x"}, "y": 3}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "ping"},
+        ], self.directory.name)
+        by_id = {response["id"]: response for response in responses}
+        self.assertEqual(set(by_id), {None, 1, 2, 3, 4})
+        self.assertEqual(by_id[None]["error"]["code"], -32700)
+        self.assertEqual(by_id[1]["error"]["code"], -32601)
+        self.assertTrue(by_id[2]["result"]["isError"])
+        self.assertEqual(payload(by_id[2]["result"])["error"]["code"], "unknown_tool")
+        self.assertTrue(by_id[3]["result"]["isError"])
+        tap_error = payload(by_id[3]["result"])["error"]
+        self.assertEqual(tap_error["code"], "invalid_argument")
+        self.assertIn("x and y go together", tap_error["message"])
+        self.assertEqual(by_id[4]["result"], {})
+
+    def test_a_tool_call_without_a_phone_is_a_normal_mcp_error(self):
+        response = exchange([{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "pua_observe", "arguments": {}}}], self.directory.name)[0]
+        self.assertTrue(response["result"]["isError"])
+        error = payload(response["result"])["error"]
+        self.assertIn(error["code"], ("device_unavailable", "coredevice_unavailable", "axe_unavailable"))
+        self.assertEqual(error["uncertain"], False)
+
+
+class ServeTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def runtime(self, nodes=None, **core):
+        runtime = Runtime(self.directory.name)
+        self.addCleanup(runtime.close)
+        runtime.phone.close()
+        runtime.core = FakeCore(**core)
+        runtime.axe = FakeAxe(nodes if nodes is not None else tree(
+            node("返回", frame=(0, 0, 44, 44)),
+            node("搜索", kind="TextField", role="AXTextField", frame=(20, 100, 300, 44))))
+        runtime.phone = DeviceController(runtime.core, runtime.axe, Path(self.directory.name))
+        runtime.setup_manager.core = runtime.core
+        runtime.setup_manager.save(udid=runtime.core.udid)
+        return runtime
+
+    def call(self, runtime, name, arguments):
+        request = {"jsonrpc": "2.0", "id": name, "method": "tools/call",
+                   "params": {"name": name, "arguments": arguments}}
+        output = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(request) + "\n")), contextlib.redirect_stdout(output):
+            serve(runtime)
+        response = json.loads(output.getvalue())
+        self.assertEqual(response["id"], name)
+        self.assertNotIn("error", response)
+        return response["result"]
+
+    def test_ready_proves_both_channels_and_returns_the_first_screenshot(self):
+        runtime = self.runtime()
+        data = payload(self.call(runtime, "pua_ready", {}))
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["state"], "ready")
+        self.assertTrue(data["proof"]["coredevice"])
+        self.assertTrue(data["proof"]["axe"])
+        self.assertGreater(data["observation"]["total_nodes"], 0)
+        self.assertEqual(runtime.core.ops().count("info"), 1)
+        self.assertEqual(data["observation"]["image"]["mimeType"], "image/jpeg")
+
+    def test_ready_reports_a_locked_phone_instead_of_failing(self):
+        runtime = self.runtime()
+        runtime.axe.locked = True
+        result = self.call(runtime, "pua_ready", {"screenshot": False})
         data = payload(result)
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["searched_sources"], ["catalog"])
-        self.assertEqual(data["candidates"][0]["bundle_id"], "com.cmbchina.MPBBank")
-        self.assertFalse(data["candidates"][0]["installed_verified"])
+        self.assertFalse(result["isError"])
+        self.assertFalse(data["ready"])
+        self.assertEqual(data["state"], "locked")
+        self.assertIn("unlock", data["next_tool"])
 
-    def test_apps_catalog_is_read_only_even_when_phone_is_locked(self):
-        runtime, client = self.runtime()
-        client.locked = True
-        result = runtime.call("pua_apps", {"query": "招商银行", "source": "catalog"})
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["candidates"][0]["bundle_id"], "com.cmbchina.MPBBank")
-        self.assertEqual(client.calls, [])
+    def test_observe_tap_and_type_reach_the_right_channel(self):
+        runtime = self.runtime()
+        observed = payload(self.call(runtime, "pua_observe", {"mode": "both"}))
+        self.assertEqual(observed["app"], "SpringBoard")
+        self.assertEqual(observed["viewport"]["width"], 402)
+        self.assertEqual(observed["viewport"]["units"], "iPhone points")
+        tap = payload(self.call(runtime, "pua_tap", {"selector": {"label": "返回"}}))
+        self.assertTrue(tap["action_executed"])
+        self.assertEqual([item["label"] for item in runtime.axe.taps], ["返回"])
+        typed = payload(self.call(runtime, "pua_type_text", {"text": "hello"}))
+        self.assertTrue(typed["typed"])
+        self.assertIn("type", runtime.core.ops())
 
-    def test_stdio_invalid_arguments_return_tool_error_without_wda_access(self):
-        invalid_cases = [
-            ("pua_tap", {"x": True, "y": 200, "observation_id": "unused"}),
-            ("pua_type_text", {"selector": {"label": "Target"}, "text": "line 1\nline 2"}),
-            ("pua_find", {"selector": {"label": "Target", "predicate": "label == 'Target'"}}),
-            ("pua_batch", {"steps": [{"op": "tap", "args": {"selector": {"label": "Target"}}}, {"op": "unknown", "args": {}}]}),
-            ("wda_missing", {}),
-            ("pua_apps", {"query": "招商银行", "source": "guess"}),
-            ("pua_apps", {"query": "招商银行", "country": "CHN"}),
-            ("pua_apps", {"query": ""}),
-        ]
-        responses = self.exchange([{"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {"name": name, "arguments": args}} for index, (name, args) in enumerate(invalid_cases)])
-        self.assertEqual(len(responses), len(invalid_cases))
-        for response in responses:
-            result = response["result"]
-            self.assertTrue(result["isError"])
-            content = payload(result)
-            self.assertNotIn(content["error"]["code"], ("pua_unreachable", "action_uncertain", "internal_error"))
+    def test_a_preview_poll_answers_with_structured_content_only(self):
+        runtime = self.runtime()
+        result = self.call(runtime, "pua_screen_frame", {"after_seq": 0})
+        self.assertEqual(result["content"], [])
+        self.assertIn("frame_available", result["structuredContent"])
+        self.assertIn("structuredContent", self.call(runtime, "pua_screen", {"action": "open"}))
 
-    def test_stdio_parse_error_does_not_break_following_ping(self):
-        responses = self.exchange(["{broken", {"jsonrpc": "2.0", "id": 1, "method": "ping"}])
-        self.assertEqual(responses[0]["error"]["code"], -32700)
-        self.assertEqual(responses[1]["result"], {})
+    def test_metrics_count_tools_and_actions_separately(self):
+        runtime = self.runtime()
+        self.call(runtime, "pua_tap", {"x": 10, "y": 20})
+        self.call(runtime, "pua_observe", {"mode": "tree"})
+        data = payload(self.call(runtime, "pua_metrics", {}))
+        self.assertEqual(data["tools"]["count"], 2)
+        self.assertEqual(data["device"]["accepted_actions"], 1)
+        self.assertEqual(data["device"]["udid"], "TEST-DEVICE-1234")
+        self.assertGreaterEqual(data["responses"]["count"], 1)
 
-    def test_default_swipe_executes_once_without_progress_or_output_reads(self):
-        runtime, client = self.runtime()
-        result = runtime.call("pua_swipe", {"direction": "up"})
-        self.assertTrue(result["action_executed"])
-        self.assertFalse(result["verified"])
-        self.assertTrue(result["verification_deferred"])
-        self.assertEqual(result["attempts"], 1)
-        self.assertNotIn("observation", result)
-        self.assertEqual(client.swipe_count, 1)
-        self.assertFalse(any(path.startswith("/source") or path == "/screenshot" for _, path, _ in client.calls))
+    def test_setup_status_and_doctor_never_need_a_phone_but_say_what_is_missing(self):
+        runtime = self.runtime()
+        status = payload(self.call(runtime, "pua_setup", {"action": "status"}))
+        self.assertEqual(status["udid"], "TEST-DEVICE-1234")
+        self.assertTrue(status["coredevice"]["available"])
+        self.assertTrue(status["axe"]["available"])
+        doctor = payload(self.call(runtime, "pua_doctor", {}))
+        self.assertTrue(doctor["ok"])
+        self.assertEqual(doctor["udid"], "TEST-DEVICE-1234")
 
-    def test_swipe_schema_accepts_explicit_progress_verification_without_output(self):
-        runtime, client = self.runtime()
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_swipe", {"direction": "up", "observe": "none", "verify": True})
-        self.assertEqual(caught.exception.code, "no_scroll_progress")
-        self.assertEqual(caught.exception.details["attempts"], 1)
-        self.assertTrue(caught.exception.details["action_executed"])
-        self.assertEqual(client.swipe_count, 1)
-        self.assertIn("image", caught.exception.details["observation"])
+    def test_a_channel_fault_is_marked_uncertain(self):
+        runtime = self.runtime()
+        runtime.core.failure = PUAError("coredevice_timeout", "The helper did not answer.")
+        result = self.call(runtime, "pua_observe", {"mode": "screenshot"})
+        error = payload(result)["error"]
+        self.assertEqual(error["code"], "coredevice_timeout")
+        self.assertTrue(error["uncertain"])
 
-    def test_unknown_argument_reports_allowed_fields_without_device_access(self):
-        runtime, client = self.runtime()
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_observe", {"observe": "none"})
-        error = caught.exception.as_dict()
-        self.assertEqual(error["code"], "invalid_argument")
-        self.assertFalse(error["action_executed"])
-        self.assertEqual(error["unknown_fields"], ["observe"])
-        self.assertIn("mode", error["allowed_fields"])
-        self.assertNotIn("observe", error["allowed_fields"])
-        self.assertEqual(error["argument_path"], "arguments")
-        self.assertEqual(client.calls, [])
 
-    def test_no_progress_error_image_is_mcp_image_content_and_retains_details(self):
-        runtime, client = self.runtime()
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_swipe", {"observe": "screenshot", "max_attempts": 1, "verify": True})
-        result = result_content({"error": caught.exception.as_dict()})
-        self.assertTrue(result["isError"])
-        self.assertEqual(payload(result)["error"]["code"], "no_scroll_progress")
-        self.assertTrue(payload(result)["error"]["action_executed"])
+class ResultContentTests(unittest.TestCase):
+    def test_text_is_compact_json(self):
+        result = result_content({"alpha": 1, "beta": "two"})
+        self.assertEqual(result["content"], [{"type": "text", "text": '{"alpha":1,"beta":"two"}'}])
+        self.assertFalse(result["isError"])
+
+    def test_images_follow_the_text_block(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "shot.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        result = result_content({"ok": True, "image": {"path": str(path), "mimeType": "image/png"}})
         self.assertEqual([item["type"] for item in result["content"]], ["text", "image"])
         self.assertEqual(result["content"][1]["mimeType"], "image/png")
-        import base64
-        self.assertEqual(base64.b64decode(result["content"][1]["data"]), client.screenshot)
+        self.assertEqual(base64.b64decode(result["content"][1]["data"]), path.read_bytes())
 
-    def test_scroll_search_returns_model_image_before_a_second_gesture(self):
-        runtime, client = self.runtime()
-        client.elements.clear()
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_scroll_find", {"selector": {"label": "Missing"}, "max_swipes": 10})
-        result = result_content({"error": caught.exception.as_dict()})
+    def test_a_clean_report_is_not_an_error(self):
+        # setup discover always carries the key, with None when nothing failed.
+        result = result_content({"ok": True, "devices": [], "error": None})
+        self.assertFalse(result["isError"])
+
+    def test_an_error_is_a_result_not_a_transport_fault(self):
+        result = result_content({"error": {"code": "phone_locked", "message": "Locked.", "uncertain": False}})
         self.assertTrue(result["isError"])
-        self.assertEqual(payload(result)["error"]["swipes"], 1)
-        self.assertTrue(payload(result)["error"]["recovery"]["visual_check_required"])
-        self.assertEqual([block["type"] for block in result["content"]], ["text", "image"])
-        self.assertEqual(client.swipe_count, 1)
 
-    def test_batch_continues_optimistic_navigation_and_input_without_readback(self):
-        runtime, client = self.runtime()
-        text = "直接输入完整的长文本，不做试输入。" * 20
-        result = runtime.call("pua_batch", {"steps": [
-            {"op": "press_button", "args": {"name": "home"}},
-            {"op": "launch_app", "args": {"bundle_id": "com.example.phone"}},
-            {"op": "tap", "args": {"selector": {"label": "Target"}}},
-            {"op": "type_text", "args": {"selector": {"label": "Target"}, "text": text}},
-            {"op": "swipe", "args": {}},
-        ]})
-        self.assertTrue(result["complete"])
-        self.assertEqual(result["completed_steps"], 5)
-        self.assertTrue(all(item["action_executed"] for item in result["results"]))
-        self.assertTrue(all(item["verification_deferred"] for item in result["results"]))
-        self.assertTrue(all(not item["verified"] for item in result["results"]))
-        self.assertEqual(client.elements[0]["value"], text)
-        self.assertEqual(client.swipe_count, 1)
-        self.assertFalse(any(path.startswith("/source") or path in ("/screenshot", "/wda/activeAppInfo")
-                             or path.endswith("/attribute/value") for _, path, _ in client.calls))
 
-    def test_batch_explicit_progress_check_stops_after_no_progress(self):
-        runtime, client = self.runtime()
-        result = runtime.call("pua_batch", {"steps": [
-            {"op": "swipe", "args": {"observe": "none", "verify": True}},
-            {"op": "press_button", "args": {"name": "home", "observe": "none"}},
-        ]})
-        self.assertFalse(result["complete"])
-        self.assertEqual(result["error"]["code"], "no_scroll_progress")
-        self.assertTrue(result["error"]["action_executed"])
-        self.assertEqual(client.swipe_count, 1)
-        self.assertEqual([block["type"] for block in result_content(result)["content"]], ["text", "image"])
-        self.assertFalse(any(path == "/wda/homescreen" for _, path, _ in client.actions()))
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
 
-    def test_batch_stops_after_uncertain_action_and_never_replays_it(self):
-        runtime, client = self.runtime()
-        client.home_error = WDAError("action_uncertain", "Home response was lost", uncertain=True)
-        result = runtime.call("pua_batch", {"steps": [
-            {"op": "press_button", "args": {"name": "home"}},
-            {"op": "type_text", "args": {"selector": {"label": "Target"}, "text": "Do not enter"}},
-        ]})
-        self.assertFalse(result["complete"])
-        self.assertEqual(result["completed_steps"], 0)
-        self.assertEqual(result["error"]["code"], "action_uncertain")
-        self.assertTrue(result["error"]["uncertain"])
-        self.assertEqual([path for _, path, _ in client.actions()], ["/wda/homescreen"])
+    def run_cli(self, *flags):
+        return subprocess.run([sys.executable, str(ROOT / "server" / "iphone_use.py"),
+                               "--state-dir", self.directory.name, *flags],
+                              capture_output=True, text=True, encoding="utf-8", timeout=60,
+                              env={**os.environ, "IPHONE_USE_COREDEVICE_PYTHON": "/nonexistent/python3"})
 
-    def test_batch_stops_after_submission_until_a_deliberate_checkpoint(self):
-        runtime, client = self.runtime()
-        result = runtime.call("pua_batch", {"steps": [
-            {"op": "type_text", "args": {"selector": {"label": "Target"}, "text": "Submit once", "submit": True}},
-            {"op": "press_button", "args": {"name": "home"}},
-        ]})
-        self.assertFalse(result["complete"])
-        self.assertEqual(result["completed_steps"], 1)
-        self.assertEqual(result["stop_reason"], "submission_requires_verification")
-        self.assertTrue(result["results"][0]["submitted"])
-        self.assertEqual(sum(path == "/wda/keys" for _, path, _ in client.actions()), 1)
-        self.assertFalse(any(path == "/wda/homescreen" for _, path, _ in client.actions()))
+    def test_doctor_without_a_helper_exits_nonzero_with_a_reason(self):
+        process = self.run_cli("--doctor")
+        self.assertEqual(process.returncode, 1)
+        data = json.loads(process.stdout)
+        self.assertFalse(data["ok"])
+        self.assertTrue(data["next_steps"])
+        self.assertFalse(data["coredevice"]["available"])
+        self.assertIn("IPHONE_USE_COREDEVICE_PYTHON", " ".join(data["next_steps"]))
 
-    def test_home_and_text_accept_explicit_expected_next_state(self):
-        for name, arguments in (
-            ("pua_press_button", {"name": "home", "expect": {"label": "Target"}}),
-            ("pua_type_text", {"selector": {"label": "Target"}, "text": "Complete text", "expect": {"label": "Target"}}),
-        ):
-            with self.subTest(name=name):
-                runtime, _ = self.runtime()
-                result = runtime.call(name, arguments)
-                self.assertTrue(result["verified"])
-                self.assertFalse(result["verification_deferred"])
-                self.assertIn("postcondition", result)
-
-    def test_exact_enabled_tree_string_survives_protocol_schema(self):
-        runtime, client = self.runtime()
-        result = runtime.call("pua_find", {"selector": {"label": "Target", "enabled": "true"}})
-        self.assertEqual(result["matches"], 1)
-        query = next(body["value"] for _, path, body in client.calls if path == "/elements")
-        self.assertIn("enabled == true", query)
-
-    def test_stdio_unknown_method_and_invalid_params_are_rpc_errors(self):
-        responses = self.exchange([
-            {"jsonrpc": "2.0", "id": 1, "method": "not/a/method"},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": []},
-        ])
-        self.assertEqual(responses[0]["error"]["code"], -32601)
-        self.assertEqual(responses[1]["error"]["code"], -32602)
-
-    def test_nested_batch_schema_is_checked_before_any_phone_request(self):
-        runtime, client = self.runtime()
-        steps = [
-            {"op": "type_text", "args": {"selector": {"label": "Target"}, "text": "Do not enter", "observe": "none"}},
-            {"op": "tap", "args": {"selector": {"label": "Target"}, "extra": True}},
-        ]
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_batch", {"steps": steps})
-        self.assertEqual(caught.exception.code, "invalid_argument")
-        details = caught.exception.as_dict()
-        self.assertEqual(details["argument_path"], "arguments.steps[1].args")
-        self.assertEqual(details["unknown_fields"], ["extra"])
-        self.assertIn("observe", details["allowed_fields"])
-        self.assertFalse(details["action_executed"])
-        self.assertEqual(client.calls, [])
-
-    def test_malformed_later_selector_is_checked_before_any_phone_request(self):
-        runtime, client = self.runtime()
-        steps = [
-            {"op": "type_text", "args": {"selector": {"label": "Target"}, "text": "Do not enter", "observe": "none"}},
-            {"op": "tap", "args": {"selector": {"label": "Target", "predicate": "label == 'Target'"}, "observe": "none"}},
-        ]
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_batch", {"steps": steps})
-        self.assertEqual(caught.exception.code, "invalid_selector")
-        self.assertEqual(client.calls, [])
-
-    def test_later_invalid_bundle_id_is_checked_before_any_phone_request(self):
-        runtime, client = self.runtime()
-        steps = [
-            {"op": "type_text", "args": {"selector": {"label": "Target"}, "text": "Do not enter", "observe": "none"}},
-            {"op": "launch_app", "args": {"bundle_id": "not-a-bundle", "observe": "none"}},
-        ]
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_batch", {"steps": steps})
-        self.assertEqual(caught.exception.code, "invalid_argument")
-        self.assertEqual(client.calls, [])
-
-    def test_coordinates_and_custom_region_accept_no_observation_id(self):
-        for name, arguments, expected_path in (
-            ("pua_tap", {"x": 10, "y": 200}, "/wda/tap"),
-            ("pua_swipe", {"region": {"x": 50, "y": 200, "width": 200, "height": 200}}, "/wda/dragfromtoforduration"),
-        ):
-            with self.subTest(name=name):
-                runtime, client = self.runtime()
-                result = runtime.call(name, arguments)
-                self.assertTrue(result["action_executed"])
-                self.assertTrue(result["verification_deferred"])
-                self.assertEqual(client.actions()[-1][1], expected_path)
-                self.assertFalse(any(path.startswith("/source") or path == "/screenshot" for _, path, _ in client.calls))
-
-    def test_incomplete_or_mixed_coordinates_fail_before_phone_access(self):
-        runtime, client = self.runtime()
-        invalid = [
-            ("pua_tap", {"x": 10}),
-            ("pua_tap", {"y": 200}),
-            ("pua_tap", {"selector": {"label": "Target"}, "x": 10}),
-        ]
-        for name, arguments in invalid:
-            with self.subTest(name=name, arguments=arguments), self.assertRaises(WDAError) as caught:
-                runtime.call(name, arguments)
-            self.assertEqual(caught.exception.code, "invalid_argument")
-        self.assertEqual(client.calls, [])
-
-    def test_unbound_coordinates_and_region_still_check_viewport_before_mutation(self):
-        for name, arguments in (
-            ("pua_tap", {"x": 390, "y": 200}),
-            ("pua_swipe", {"region": {"x": 300, "y": 200, "width": 200, "height": 200}}),
-        ):
-            with self.subTest(name=name):
-                runtime, client = self.runtime()
-                with self.assertRaises(WDAError) as caught:
-                    runtime.call(name, arguments)
-                self.assertEqual(caught.exception.code, "invalid_argument")
-                self.assertFalse(caught.exception.as_dict().get("action_executed", False))
-                self.assertEqual(client.actions(), [])
-
-    def test_other_process_holding_operation_lock_refuses_all_phone_requests(self):
-        runtime, client = self.runtime()
-        script = "import fcntl,sys; lock=open(sys.argv[1], 'a'); fcntl.flock(lock, fcntl.LOCK_EX); print('locked', flush=True); sys.stdin.read(); lock.close()"
-        worker = subprocess.Popen(
-            [sys.executable, "-c", script, str(Path(self.directory.name) / "operation.lock")],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            self.assertEqual(worker.stdout.readline().strip(), "locked")
-            with self.assertRaises(WDAError) as caught:
-                runtime.call("pua_tap", {"selector": {"label": "Target"}, "observe": "none"})
-            self.assertEqual(caught.exception.code, "device_busy")
-            self.assertEqual(client.calls, [])
-        finally:
-            try:
-                worker.communicate(input="release", timeout=3)
-            except subprocess.TimeoutExpired:
-                worker.kill()
-                worker.communicate()
-        self.assertEqual(worker.returncode, 0)
-
-    def test_independent_runtimes_share_usable_session_without_new_phone_request(self):
-        first, first_client = self.runtime()
-        second, second_client = self.runtime()
-        first_client.session_id = "shared-session-123"
-        with patch.object(first, "_call", side_effect=lambda name, args: {"session_id": first.client.session_id}):
-            self.assertEqual(first.call("pua_metrics", {}), {"session_id": "shared-session-123"})
-        self.assertIsNone(second_client.session_id)
-        with patch.object(second, "_call", side_effect=lambda name, args: {"session_id": second.client.session_id}):
-            self.assertEqual(second.call("pua_metrics", {}), {"session_id": "shared-session-123"})
-        self.assertEqual(first_client.calls + second_client.calls, [])
-        cache = Path(self.directory.name) / "session.json"
-        self.assertEqual(json.loads(cache.read_text()), {"url": first.base_url, "session_id": "shared-session-123"})
-        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
-
-    def test_locked_phone_blocks_mutations_before_semantic_lookup(self):
-        runtime, client = self.runtime()
-        client.locked = True
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_tap", {"selector": {"label": "Target"}, "observe": "none"})
-        self.assertEqual(caught.exception.code, "phone_locked")
-        self.assertEqual(client.calls, [("GET", "/wda/locked", None)])
-        self.assertEqual(client.actions(), [])
-
-    def test_ready_requires_unlocked_phone_before_session_or_observation(self):
-        runtime, client = self.runtime()
-        client.locked = True
-        with self.assertRaises(WDAError) as caught:
-            runtime.call("pua_ready", {"screenshot": False})
-        self.assertEqual(caught.exception.code, "phone_locked")
-        self.assertEqual(client.calls, [("GET", "/status", None), ("GET", "/wda/locked", None)])
-        self.assertIsNone(client.session_id)
-
-    def test_ready_empty_tree_with_mirroring_running_reports_conflict(self):
-        runtime, client = self.runtime()
-        client.nodes = []
-        with patch.object(runtime.setup_manager, "mirroring_running", return_value=True), self.assertRaises(WDAError) as caught:
-            runtime.call("pua_ready", {"screenshot": False})
-        self.assertEqual(caught.exception.code, "mirroring_conflict")
-        self.assertFalse(any(path in ("/wda/tap", "/wda/keys") for _, path, _ in client.actions()))
-
-    def test_ready_nonempty_tree_proves_unlocked_usable_phone(self):
-        runtime, client = self.runtime()
-        with patch.object(runtime.setup_manager, "mirroring_running", return_value=False):
-            result = runtime.call("pua_ready", {"screenshot": False})
-        self.assertTrue(result["ready"])
-        self.assertEqual(result["state"], "ready")
-        self.assertTrue(result["proof"]["phone_unlocked"])
-        self.assertTrue(result["proof"]["session_usable"])
-        self.assertGreater(result["observation"]["total_nodes"], 0)
+    def test_ready_without_a_helper_exits_nonzero(self):
+        process = self.run_cli("--ready")
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("error", json.loads(process.stdout))
 
 
 if __name__ == "__main__":

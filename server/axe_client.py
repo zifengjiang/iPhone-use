@@ -1,9 +1,8 @@
 """Read the accessibility tree of a physical device through AXe.
 
 AXe talks to ``com.apple.accessibility.axAuditDaemon.remoteAXService`` over the
-CoreDevice tunnel, so a device without a WebDriverAgent Runner still answers with
-the real element tree. This module only drives the ``axe`` binary; AXe owns the
-protocol, the per-device broker and the retry rules.
+CoreDevice tunnel and returns the real element tree. This module only drives the
+``axe`` binary; AXe owns the protocol, the per-device broker and the retry rules.
 
 Docs: https://github.com/cameroncooke/AXe (MIT).
 """
@@ -14,7 +13,7 @@ import pathlib
 import shutil
 import subprocess
 
-from wda_client import WDAError
+from errors import PUAError as PUAError
 
 BINARY_NAME = "axe"
 DEFAULT_INSTALL = pathlib.Path.home() / ".local" / "share" / "iphone-use-axe" / "axe"
@@ -53,19 +52,19 @@ class AxeClient:
 
     def _run(self, *args):
         if not self.binary:
-            raise WDAError("axe_unavailable", "AXe is not installed; set IPHONE_USE_AXE to the axe binary.")
+            raise PUAError("axe_unavailable", "AXe is not installed; set IPHONE_USE_AXE to the axe binary.")
         try:
             done = subprocess.run([self.binary, *args], capture_output=True, text=True, timeout=self.timeout)
         except subprocess.TimeoutExpired as expired:
-            raise WDAError("axe_timeout", f"AXe did not answer within {self.timeout:g}s.", uncertain=True) from expired
+            raise PUAError("axe_timeout", f"AXe did not answer within {self.timeout:g}s.", uncertain=True) from expired
         except OSError as error:
-            raise WDAError("axe_unavailable", f"AXe could not start: {error}") from error
+            raise PUAError("axe_unavailable", f"AXe could not start: {error}") from error
         if done.returncode != 0:
             message = (done.stderr or done.stdout or "").strip().splitlines()
             text = message[-1] if message else f"AXe exited with {done.returncode}."
             code = next((value for phrase, value in _MESSAGES if phrase in text), None) \
                 or next((value for name, value in _ERRORS.items() if name in text), "axe_failed")
-            raise WDAError(code, text[:300], uncertain=code not in ("axe_target_not_found", "axe_not_paired"))
+            raise PUAError(code, text[:300], uncertain=code not in ("axe_target_not_found", "axe_not_paired"))
         return done.stdout
 
     def describe_ui(self, udid, point=None):
@@ -76,7 +75,7 @@ class AxeClient:
         try:
             return json.loads(text) if text else []
         except json.JSONDecodeError as error:
-            raise WDAError("axe_failed", f"AXe returned unreadable JSON: {text[:120]}") from error
+            raise PUAError("axe_failed", f"AXe returned unreadable JSON: {text[:120]}") from error
 
     def tap(self, udid, identifier=None, label=None, value=None, element_type=None, timeout=None):
         args = ["tap", "--udid", udid]
@@ -88,7 +87,7 @@ class AxeClient:
             args += ["--wait-timeout", f"{timeout:g}"]
         try:
             self._run(*args)
-        except WDAError as error:
+        except PUAError as error:
             # Overlapping windows make AXe refuse; narrowing by type often resolves it.
             if error.code != "axe_ambiguous_target" or not element_type:
                 raise

@@ -11,7 +11,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--ready',action='store_true',help='Verify an already-running real WDA; reads phone source and screenshot.');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--ready',action='store_true',help='Verify the local CoreDevice helper and AXe with a real phone; reads the tree and a screenshot.');args=parser.parse_args()
     child=subprocess.Popen([sys.executable,str(ROOT/'server/iphone_use.py')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,text=True)
     counter=0;records=[]
     def rpc(method,params):
