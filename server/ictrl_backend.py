@@ -20,6 +20,12 @@ MCP_TOOLS = {"pua_setup", "pua_doctor", "pua_ready", "pua_observe", "pua_batch",
     f"pua_{action}" for action in SUPPORTED_ACTIONS
 }
 _ID = re.compile(r"[a-zA-Z0-9-]{4,64}")
+# Discovery browses DNSService for the full wait on every reconnect, while a
+# cached endpoint answers a probe in tens of milliseconds. Keep the last good
+# endpoint beside the token store so an idle session skips discovery.
+_ENDPOINT_TTL = 300.0
+_PROBE_TIMEOUT = 1.2
+_SCAN_WAIT = 1.5
 
 
 def unsupported(message):
@@ -49,10 +55,11 @@ class IctrlClient:
         self.connection = None
         self.sequence = 0
 
-    @staticmethod
-    def scan():
+    def scan(self, wait=None, want=False):
+        # want stops browsing as soon as the configured device answers.
+        predicate = (lambda row: row.get("id", "").lower() == self.target) if (want and self.target) else None
         try:
-            return [row for row in ictrl_rpc.nearby_scan(wait=3.0)
+            return [row for row in ictrl_rpc.nearby_scan(wait=wait or _SCAN_WAIT, want=predicate)
                     if isinstance(row.get("id"), str) and _ID.fullmatch(row["id"])
                     and row.get("channel") in ("awdl", "lan") and _local_endpoint(row.get("host"))]
         except (OSError, ValueError) as error:
@@ -61,7 +68,7 @@ class IctrlClient:
     @classmethod
     def discover(cls):
         found = {}
-        for row in cls.scan():
+        for row in cls("").scan(wait=3.0):
             entry = found.setdefault(row["id"], {"device_id": row["id"], "name": row.get("name"), "transports": []})
             if row["channel"] not in entry["transports"]:
                 entry["transports"].append(row["channel"])
@@ -81,28 +88,83 @@ class IctrlClient:
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             raise WDAError("ictrl_pairing_required", "Pair the selected iCTRL device once with the upstream client and keep its token file private (0600).") from error
 
+    def _endpoint_file(self):
+        if not self.target:
+            return None
+        return self.token_store.parent / f"iphone-use-endpoint-{self.target}.json"
+
+    def _cached_endpoint(self):
+        path = self._endpoint_file()
+        if path is None:
+            return None
+        try:
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+                return None
+            row = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            return None
+        if (not isinstance(row, dict) or row.get("id") != self.target
+                or not isinstance(row.get("host"), str) or not _local_endpoint(row["host"])):
+            return None
+        return {"id": row["id"], "host": row["host"], "channel": row.get("channel"), "name": row.get("name")}
+
+    def _remember_endpoint(self, row):
+        path = self._endpoint_file()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(f".{os.getpid()}.tmp")
+            temporary.write_text(json.dumps({"id": self.target, "host": row["host"],
+                                             "channel": row.get("channel"), "name": row.get("name")}))
+            os.chmod(temporary, 0o600)
+            temporary.replace(path)
+        except OSError:
+            pass
+
+    def _forget_endpoint(self):
+        path = self._endpoint_file()
+        try:
+            if path is not None:
+                path.unlink()
+        except OSError:
+            pass
+
+    def _candidates(self):
+        cached = self._cached_endpoint()
+        if cached:
+            yield cached
+        # Wi-Fi answers in tens of milliseconds; AWDL adds hundreds and jitter,
+        # so a device reachable both ways must not be reached over AWDL.
+        rows = [row for row in self.scan(want=True) if row["id"].lower() == self.target]
+        for row in sorted(rows, key=lambda row: row.get("channel") != "lan"):
+            if not cached or row["host"] != cached["host"]:
+                yield row
+
     def _connect(self):
         if not self.target:
             raise WDAError("ictrl_device_required", "Run pua_setup(action=discover), then set IPHONE_USE_ICTRL_DEVICE_ID for this MCP instance.")
-        candidates = [row for row in self.scan() if row["id"].lower() == self.target]
-        if not candidates:
-            raise WDAError("ictrl_unreachable", "The selected iCTRL Runner was not discovered. Check that it is awake, running and has Nearby Discovery enabled.")
-        ids = {row["id"] for row in candidates}
-        if len(ids) != 1:
-            raise WDAError("ictrl_device_ambiguous", "Nearby results disagree about the selected device ID.")
-        device_id = next(iter(ids))
+        device_id = self.target
         credential = self._credential(device_id)
         last_error = None
-        for row in sorted(candidates, key=lambda row: row["channel"] != "awdl"):
+        for row in self._candidates():
             try:
-                info = self._send(row["host"], credential, "device_info", {}, 4, action=False)
-                if info.get("device_id") != device_id:
-                    raise WDAError("ictrl_identity_mismatch", "The authenticated Runner did not match the selected iCTRL device.")
-                self.connection = (row, credential, time.monotonic() + 30)
-                return info
+                info = self._send(row["host"], credential, "device_info", {}, _PROBE_TIMEOUT, action=False)
             except WDAError as error:
+                if error.code == "ictrl_pairing_required":
+                    raise
                 last_error = error
-        raise last_error
+                self._forget_endpoint()
+                continue
+            if info.get("device_id") != device_id:
+                last_error = WDAError("ictrl_identity_mismatch", "The authenticated Runner did not match the selected iCTRL device.")
+                self._forget_endpoint()
+                continue
+            self.connection = (row, credential, time.monotonic() + _ENDPOINT_TTL)
+            self._remember_endpoint(row)
+            return info
+        raise last_error or WDAError("ictrl_unreachable", "The selected iCTRL Runner was not discovered. Check that it is awake, running and has Nearby Discovery enabled.")
 
     def _send(self, endpoint, credential, method, params, timeout, *, action):
         self.sequence += 1
@@ -130,8 +192,10 @@ class IctrlClient:
         row, credential, _ = self.connection
         try:
             return self._send(row["host"], credential, method, params or {}, timeout or 12, action=action)
-        except WDAError:
+        except WDAError as error:
             self.close()
+            if error.code == "ictrl_unreachable":
+                self._forget_endpoint()  # The address went stale; rediscover next time.
             raise
 
     def close(self):

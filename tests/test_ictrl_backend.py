@@ -91,10 +91,11 @@ class IctrlBackendTests(unittest.TestCase):
         worker.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        scan = patch.object(wire, "nearby_scan", return_value=[{"id": DEVICE, "name": "Test iPhone", "channel": "lan",
-                                                                 "host": f"127.0.0.1:{server.server_port}"}])
-        scan.start()
-        self.addCleanup(scan.stop)
+        self.port = server.server_port
+        self.scan = patch.object(wire, "nearby_scan", return_value=[{"id": DEVICE, "name": "Test iPhone", "channel": "lan",
+                                                                    "host": f"127.0.0.1:{self.port}"}])
+        self.scan.start()
+        self.addCleanup(self.scan.stop)
         with patch.dict(os.environ, {"IPHONE_USE_BACKEND": "ictrl", "IPHONE_USE_ICTRL_DEVICE_ID": DEVICE}):
             self.runtime = Runtime(self.state / "runtime")
         self.runtime.client.token_store = self.store
@@ -120,6 +121,53 @@ class IctrlBackendTests(unittest.TestCase):
         settings = self.runtime.call("pua_launch_app", {"bundle_id": "com.apple.Preferences", "observe": "tree", "verify": True})
         self.assertEqual(settings["observation"]["app"], "com.apple.Preferences")
         self.assertIn(("activate_app", {"bundle_id": "com.apple.Preferences"}), self.methods)
+
+    def test_reconnect_reuses_the_cached_endpoint(self):
+        self.runtime.call("pua_ready", {"screenshot": False})
+        endpoint = self.runtime.client._endpoint_file()
+        self.assertTrue(endpoint.is_file())
+        self.assertEqual(endpoint.stat().st_mode & 0o777, 0o600)
+        self.runtime.client.close()
+        wire.nearby_scan.reset_mock()
+        self.runtime.call("pua_ready", {"screenshot": False})
+        self.assertEqual(wire.nearby_scan.call_count, 0)
+
+    def test_stale_endpoint_falls_back_to_discovery(self):
+        self.runtime.call("pua_ready", {"screenshot": False})
+        endpoint = self.runtime.client._endpoint_file()
+        endpoint.write_text(json.dumps({"id": DEVICE, "host": "127.0.0.1:1", "channel": "lan"}))
+        os.chmod(endpoint, 0o600)
+        self.runtime.client.close()
+        wire.nearby_scan.reset_mock()
+        self.runtime.call("pua_ready", {"screenshot": False})
+        self.assertGreaterEqual(wire.nearby_scan.call_count, 1)
+        self.assertEqual(json.loads(endpoint.read_text())["host"], f"127.0.0.1:{self.port}")
+
+    def test_unsafe_endpoint_cache_is_ignored(self):
+        self.runtime.call("pua_ready", {"screenshot": False})
+        endpoint = self.runtime.client._endpoint_file()
+        os.chmod(endpoint, 0o644)
+        self.runtime.client.close()
+        wire.nearby_scan.reset_mock()
+        self.runtime.call("pua_ready", {"screenshot": False})
+        self.assertGreaterEqual(wire.nearby_scan.call_count, 1)
+
+    def test_lan_is_preferred_over_awdl(self):
+        self.scan.return_value = [
+            {"id": DEVICE, "name": "Test iPhone", "channel": "awdl", "host": "[fe80::1%awdl0]:1"},
+            {"id": DEVICE, "name": "Test iPhone", "channel": "lan", "host": f"127.0.0.1:{self.port}"},
+        ]
+        self.runtime.call("pua_ready", {"screenshot": False})
+        self.assertEqual(self.runtime.client.connection[0]["channel"], "lan")
+
+    def test_discovery_stops_early_for_the_configured_device(self):
+        self.runtime.call("pua_ready", {"screenshot": False})
+        kwargs = wire.nearby_scan.call_args.kwargs
+        self.assertLessEqual(kwargs["wait"], 2.0)
+        want = kwargs["want"]
+        self.assertTrue(callable(want))
+        self.assertTrue(want({"id": DEVICE}))
+        self.assertFalse(want({"id": "another-phone"}))
 
     def test_failed_action_is_never_replayed(self):
         self.drop_tap = True
