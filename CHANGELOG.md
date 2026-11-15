@@ -2,6 +2,8 @@
 
 ## 未发布 — 只保留 CoreDevice + AXe
 
+- **本项目独立维护。** 主线以 CoreDevice + AXe 为准，不再跟进 0.3.13–0.3.16 基于 WDA 的功能（系统截图工具、GA4/PostHog 埋点、`screen_action` 的指针拖拽、snapshot 深度限制）；上游那条线的历史保留在 `archive/upstream-0.3.16` 分支。
+
 - **删除 WDA 后端。** `server/wda_client.py`、`wda_controller.py`、`wda_setup.py`、`wda_text.py`，`tooling/` 下的 node 转发器与 MJPEG 桥接，以及 Xcode / WebDriverAgent 安装、签名、iproxy 与 `/wda/*` 全部移除。手机端不再安装任何 runner。
 - **删除 iCTRL 后端。** `server/ictrl_backend.py`、`server/vendor/ictrl_rpc.py` 与 `IPHONE_USE_BACKEND`、`IPHONE_USE_ICTRL_DEVICE_ID`、Runner 降级与配对流程移除；预览只保留 CoreDevice 视频流。
 - **唯一控制器。** `HybridController` 收敛为 `DeviceController`：截图、HID、键盘、按键、解锁与启动走 CoreDevice，元素树与按选择器点击走 AXe，两处都失败时返回截图与坐标换算。
