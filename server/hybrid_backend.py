@@ -134,6 +134,10 @@ class HybridController(IctrlController):
         if not self.core.available():
             raise WDAError("coredevice_unavailable",
                            "Unlocking needs the CoreDevice helper; set IPHONE_USE_COREDEVICE_PYTHON.")
+        if self.lock_state() is False:
+            # Typing a passcode into an already unlocked phone lands on whatever is
+            # on screen, so report the state instead of gesture-driving the device.
+            return {"locked": False, "unlocked": False, "duration_ms": 0, "backend": "coredevice"}
         reply = self.core.call("unlock", passcode=code, interval=float(interval))
         locked = self.lock_state()
         return {"locked": locked, "unlocked": locked is False, "duration_ms": reply.get("duration_ms"),

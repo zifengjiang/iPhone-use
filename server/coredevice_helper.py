@@ -28,14 +28,6 @@ CAPTURE_TIMEOUT = 4.0
 MODEL_SHORT_SIDE = 768
 MODEL_LONG_SIDE = 1568
 JPEG_QUALITY = 80
-# The passcode keypad is laid out per device width; these fractions come from
-# measured taps on a 1206x2622 iPhone and hold for the 0.75/0.5/0.25 columns.
-KEYPAD = {
-    "1": (0.25, 0.3988), "2": (0.50, 0.3988), "3": (0.75, 0.3988),
-    "4": (0.25, 0.5112), "5": (0.50, 0.5112), "6": (0.75, 0.5112),
-    "7": (0.25, 0.6237), "8": (0.50, 0.6237), "9": (0.75, 0.6237),
-    "0": (0.50, 0.7188), "delete": (0.75, 0.8750),
-}
 BUTTONS = {
     "home": (0x0C, 0x40), "lock": (0x0C, 0x30), "siri": (0x0C, 0xCF),
     "volumeup": (0x0C, 0xE9), "volumedown": (0x0C, 0xEA), "mute": (0x0C, 0xE2),
@@ -264,15 +256,16 @@ async def run(device, op, args):
         return await device.launch(args["bundle_id"], args.get("terminate_existing", True))
     if op == "unlock":
         started = time.monotonic()
-        await device.tap(0.5, 0.4)                       # wake the display
-        await asyncio.sleep(0.4)
-        await device.swipe(0.5, 0.90, 0.5, 0.45, 0.35)   # reveal the passcode pad
-        await asyncio.sleep(1.6)                         # keypad animation
-        for digit in args["passcode"]:
-            x, y = KEYPAD[digit]
-            await device.tap(x, y, 0.05)
-            await asyncio.sleep(args.get("interval", 0.45))
+        # Wake, then drag from the bottom edge: iOS shows Face ID first and only
+        # reveals the passcode pad after it gives up, so the pause covers both.
+        await device.tap(0.5, 0.4)
         await asyncio.sleep(0.8)
+        await device.swipe(0.5, 0.99, 0.5, 0.60, 0.45, steps=16)
+        await asyncio.sleep(2.6)
+        # Typing beats tapping the keypad: coordinate taps on the pad drop reports
+        # under load (measured 2 of 6), the keyboard delivers every keystroke.
+        await device.write(args["passcode"], char_delay=args.get("interval", 0.25))
+        await asyncio.sleep(1.0)
         return {"duration_ms": round((time.monotonic() - started) * 1000), "digits": len(args["passcode"])}
     raise ValueError(f"unknown op: {op}")
 
