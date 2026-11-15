@@ -23,7 +23,7 @@ function findHelper(): string {
 }
 
 const HELPER = findHelper()
-const UDID = process.env.IPHONE_USE_COREDEVICE_UDID ?? ''
+let UDID = process.env.IPHONE_USE_COREDEVICE_UDID ?? ''
 
 type Json = Record<string, unknown>
 
@@ -128,6 +128,18 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('frame', async (input: Json) => frame(Number(input.after) || 0, Number(input.timeout) || 2500))
   orca.panels.handle('size', async () => ({ ...size, udid: UDID, streaming: stream !== null }))
+  orca.panels.handle('device', async (input: Json) => {
+    const next = String(input.udid ?? '').trim()
+    if (next && next !== UDID) {
+      stream?.kill(); stream = null
+      action?.kill(); action = null
+      UDID = next
+      frames = null; sequence = 0
+      const info = await call('info').catch(() => ({}))
+      if (info.point_width) size = { width: Number(info.point_width), height: Number(info.point_height) }
+    }
+    return { ...size, udid: UDID, streaming: stream !== null }
+  })
   orca.panels.handle('tap', async (input: Json) => {
     const x = Number(input.x), y = Number(input.y)
     await call('tap', { x: x / size.width, y: y / size.height })
