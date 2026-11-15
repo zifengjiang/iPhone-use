@@ -415,6 +415,29 @@ class ScreenHub:
         bundled = Path.home() / ".local" / "share" / "iphone-use-axe" / "axe"
         return str(bundled) if bundled.is_file() else None
 
+    @staticmethod
+    def _coredevice_python():
+        override = os.environ.get("IPHONE_USE_COREDEVICE_PYTHON")
+        if override:
+            return override if Path(override).is_file() else None
+        default = Path.home() / ".local" / "share" / "iphone-use-coredevice" / "venv" / "bin" / "python"
+        return str(default) if default.is_file() else None
+
+    @classmethod
+    def _coredevice_command(cls, udid, config):
+        """The device's own HEVC stream, decoded by our helper: no Runner, no forwarder."""
+        if config.get("stream_backend") not in (None, "coredevice"):
+            return None
+        python = cls._coredevice_python()
+        helper = Path(__file__).with_name("coredevice_helper.py")
+        if not python or not helper.is_file():
+            return None
+        fps = config.get("stream_fps", 10)
+        quality = config.get("stream_quality", 60)
+        scale = config.get("stream_scale", 0.5)
+        return [python, str(helper), "--stream", "--udid", udid, "--fps", str(fps),
+                "--quality", str(quality), "--scale", str(scale)]
+
     @classmethod
     def _axe_command(cls, udid, config):
         """AXe already answers the device's own stream, so no Runner or forwarder is needed."""
@@ -440,12 +463,9 @@ class ScreenHub:
             port = config.get("mjpeg_device_port", 9100)
             if not isinstance(udid, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,64}", udid):
                 return None
-            # AXe streams only when its CoreDevice service directory answers; otherwise the
-            # device's own MJPEG server stays the source. Opt in per install.
-            if config.get("stream_backend") == "axe":
-                axe = self._axe_command(udid, config)
-                if axe:
-                    return axe
+            stream = self._coredevice_command(udid, config)
+            if stream:
+                return stream
             if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
                 return None
             node = shutil.which("node")

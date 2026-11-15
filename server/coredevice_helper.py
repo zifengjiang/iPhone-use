@@ -117,8 +117,10 @@ class Device:
     async def tunnel(self):
         if self.rsd is not None:
             return self.rsd
-        from pymobiledevice3.remote.native_tunnel import establish_native_rsd
-        self.rsd = await establish_native_rsd(await self.resolve())
+        # A userspace tunnel keeps its own socket stack, so Apple's remoted keeps its
+        # RSD connection and Xcode-side services (which AXe needs) stay reachable.
+        from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
+        self.rsd = await establish_userspace_rsd(await self.resolve())
         return self.rsd
 
     async def points(self):
@@ -381,5 +383,81 @@ async def main():
         await device.drop_stream()
 
 
+class _MjpegTap:
+    """Emits the device's own video stream as multipart JPEG on stdout.
+
+    The device's encoder only sends keyframes while the host acknowledges frames, and
+    VncStreamServer already answers that (RCTL) and decodes HEVC, so the tap only turns
+    its BGRA frames into JPEG.
+    """
+
+    def __init__(self, rsd, fps=10, quality=60, scale=0.5):
+        from pymobiledevice3.remote.core_device.vnc_server import VncStreamServer
+        tap = self
+        self._fps = max(1, min(int(fps), 30))
+        self._quality = max(1, min(int(quality), 100))
+        self._scale = max(0.1, min(float(scale), 1.0))
+        self._last = 0.0
+        self._count = 0
+
+        class Server(VncStreamServer):
+            def _broadcast_frame(self, bgra, width, height, rotation):
+                super()._broadcast_frame(bgra, width, height, rotation)
+                tap.emit(bgra, width, height)
+
+        self._server = Server(rsd, port=0)
+
+    def emit(self, bgra, width, height):
+        import io, time
+        from PIL import Image
+        now = time.monotonic()
+        if now - self._last < 1.0 / self._fps:
+            return
+        self._last = now
+        image = Image.frombuffer("RGBA", (width, height), bgra, "raw", "BGRA", 0, 1)
+        if self._scale < 1.0:
+            image = image.resize((max(1, int(width * self._scale)), max(1, int(height * self._scale))),
+                                 Image.BILINEAR)
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, "JPEG", quality=self._quality)
+        data = buffer.getvalue()
+        out = sys.stdout.buffer
+        out.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(data)).encode()
+                  + b"\r\n\r\n" + data + b"\r\n")
+        out.flush()
+        self._count += 1
+
+    async def serve(self):
+        await self._server.serve()
+
+
+async def stream_forever(udid, fps, quality, scale):
+    from PIL import Image  # noqa: F401 - fail fast when the encoder is missing
+    device = Device(udid)
+    rsd = await device.tunnel()
+    tap = _MjpegTap(rsd, fps=fps, quality=quality, scale=scale)
+    sys.stderr.write(f"streaming {rsd.product_type} at {tap._fps}fps\n")
+    sys.stderr.flush()
+    await tap.serve()
+
+
+def _stream_options(argv):
+    values = {"udid": None, "fps": 10, "quality": 60, "scale": 0.5}
+    index = 0
+    while index < len(argv):
+        name = argv[index]
+        if name in ("--fps", "--quality", "--scale", "--udid") and index + 1 < len(argv):
+            key = name[2:]
+            values[key] = argv[index + 1] if key == "udid" else float(argv[index + 1])
+            index += 2
+        else:
+            index += 1
+    return values
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    if "--stream" in sys.argv:
+        options = _stream_options(sys.argv)
+        asyncio.run(stream_forever(options["udid"], options["fps"], int(options["quality"]), options["scale"]))
+    else:
+        asyncio.run(main())
