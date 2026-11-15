@@ -421,8 +421,13 @@ class _MjpegTap:
         if now - self._last < 1.0 / self._fps:
             return
         self._last = now
-        if now - getattr(self, "_checked", 0.0) > 2.0:
+        if now - getattr(self, "_checked", 0.0) > 0.5:
             self._checked = now
+            import gc
+            # Decoded BGRA frames (~14 MB each) form reference cycles that only a
+            # full collection reclaims; without this the decoder's pool grows into
+            # the gigabytes while the stream runs.
+            gc.collect()
             limit = float(os.environ.get("IPHONE_USE_STREAM_MAX_MB", "600"))
             used = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
             if used > limit:
