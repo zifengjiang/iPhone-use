@@ -6,7 +6,9 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;flex-direction:column;height:100vh}
 header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:600}
-header .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+header .phone{position:relative;display:inline-flex;flex:none}
+header .phone svg{display:block}
+header .dot{position:absolute;right:-2px;bottom:-1px;width:7px;height:7px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 2px var(--bg)}
 header .dot.live{background:var(--live)}
 header .meta{margin-left:auto;font-weight:400;color:var(--muted);font-variant-numeric:tabular-nums}
 main{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px}
@@ -18,7 +20,7 @@ button:hover{border-color:var(--muted)}
 #empty{color:var(--muted);max-width:280px;text-align:center;line-height:1.6}
 </style></head>
 <body>
-<header><span class="dot" id="dot"></span><span>iPhone</span><span class="meta" id="meta">连接中…</span></header>
+<header><span class="phone"><svg width="13" height="18" viewBox="0 0 13 18" fill="none" aria-hidden="true"><rect x="0.6" y="0.6" width="11.8" height="16.8" rx="2.6" stroke="currentColor" stroke-width="1.2"/><path d="M4.6 2.9h3.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg><span class="dot" id="dot"></span></span><span>iPhone</span><span class="meta" id="meta">连接中…</span></header>
 <main><img id="frame" alt="" hidden><div id="empty">正在从 USB iPhone 取画面…</div></main>
 <footer>
   <button id="home">主屏</button><button id="lock">锁屏</button><button id="retry">重连</button>

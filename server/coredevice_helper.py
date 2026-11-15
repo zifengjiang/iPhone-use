@@ -18,13 +18,14 @@ Every operation replies, including failures, so the caller never guesses.
 import asyncio
 import base64
 import json
+import os
 import struct
 import sys
 import time
 
 IDLE_STREAM_SECONDS = 90.0
 CAPTURE_TIMEOUT = 4.0
-# Mirror wda_image: the model gets 768 px on the short side and 1568 px on the long one.
+# Mirror image.py: the model gets 768 px on the short side and 1568 px on the long one.
 MODEL_SHORT_SIDE = 768
 MODEL_LONG_SIDE = 1568
 JPEG_QUALITY = 80
@@ -119,8 +120,14 @@ class Device:
             return self.rsd
         # A userspace tunnel keeps its own socket stack, so Apple's remoted keeps its
         # RSD connection and Xcode-side services (which AXe needs) stay reachable.
+        udid = await self.resolve()
         from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
-        self.rsd = await establish_userspace_rsd(await self.resolve())
+        try:
+            self.rsd = await establish_userspace_rsd(udid)
+        except Exception:
+            # A Wi-Fi-only device is not on usbmux, so the pairing daemon's tunnel is the way in.
+            from pymobiledevice3.remote.native_tunnel import establish_native_rsd
+            self.rsd = await establish_native_rsd(udid)
         return self.rsd
 
     async def points(self):
@@ -408,12 +415,22 @@ class _MjpegTap:
         self._server = Server(rsd, port=0)
 
     def emit(self, bgra, width, height):
-        import io, time
+        import io, resource, time
         from PIL import Image
         now = time.monotonic()
         if now - self._last < 1.0 / self._fps:
             return
         self._last = now
+        if now - getattr(self, "_checked", 0.0) > 2.0:
+            self._checked = now
+            limit = float(os.environ.get("IPHONE_USE_STREAM_MAX_MB", "600"))
+            used = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
+            if used > limit:
+                # The decoder in pymobiledevice3 keeps growing while nobody consumes
+                # its clients, so the stream is recycled by the parent instead.
+                sys.stderr.write(f"stream memory {used:.0f}MB over {limit:.0f}MB, recycling\n")
+                sys.stderr.flush()
+                os._exit(75)
         image = Image.frombuffer("RGBA", (width, height), bgra, "raw", "BGRA", 0, 1)
         if self._scale < 1.0:
             image = image.resize((max(1, int(width * self._scale)), max(1, int(height * self._scale))),

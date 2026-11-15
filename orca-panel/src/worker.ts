@@ -28,6 +28,10 @@ let UDID = process.env.IPHONE_USE_COREDEVICE_UDID ?? ''
 type Json = Record<string, unknown>
 
 let stream: ChildProcess | null = null
+let wantStream = false
+const STREAM_MODE = process.env.IPHONE_USE_PANEL_STREAM === '1'
+let shotBusy = false
+let restartTimer: NodeJS.Timeout | null = null
 let frames: Buffer | null = null
 let sequence = 0
 let waiters: Array<() => void> = []
@@ -59,13 +63,22 @@ function watchStream(child: ChildProcess) {
       wake()
     }
   })
-  child.on('exit', () => { stream = null; wake() })
+  child.on('exit', () => {
+    stream = null
+    wake()
+    // The upstream decoder grows without a consuming VNC client and recycles itself
+    // at IPHONE_USE_STREAM_MAX_MB; bring a fresh one up so the panel keeps flowing.
+    if (wantStream && !restartTimer) {
+      restartTimer = setTimeout(() => { restartTimer = null; if (wantStream) startStream() }, 400)
+    }
+  })
 }
 
 function startStream(): boolean {
   if (stream || !existsSync(HELPER) || !existsSync(PYTHON)) return false
+  wantStream = true
   stream = spawn(PYTHON, [HELPER, '--stream', '--udid', UDID, '--fps', '10', '--quality', '60', '--scale', '0.6'],
-    { stdio: ['ignore', 'pipe', 'ignore'] })
+    { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, IPHONE_USE_STREAM_MAX_MB: process.env.IPHONE_USE_STREAM_MAX_MB ?? '500' } })
   watchStream(stream)
   return true
 }
@@ -104,7 +117,25 @@ function call(op: string, args: Json = {}): Promise<Json> {
   })
 }
 
+async function still(): Promise<Json | null> {
+  if (shotBusy) return null
+  shotBusy = true
+  const result = await call('screenshot').catch(() => null)
+  shotBusy = false
+  return result
+}
+
 async function frame(after: number, timeout: number): Promise<Json> {
+  if (!STREAM_MODE) {
+    // The pymobiledevice3 decoder balloons to gigabytes without a consuming client,
+    // so the panel polls stills unless a stream is explicitly requested.
+    const shot = await still()
+    if (shot?.jpeg_b64) {
+      sequence += 1
+      return { sequence, jpeg: String(shot.jpeg_b64), width: size.width, height: size.height }
+    }
+    return { sequence, waiting: true }
+  }
   if (sequence <= after) {
     if (!stream && !startStream()) return { error: 'coredevice helper is not installed', sequence }
     const deadline = Date.now() + timeout
@@ -124,6 +155,7 @@ async function frame(after: number, timeout: number): Promise<Json> {
 }
 
 process.on('exit', () => {
+  wantStream = false
   stream?.kill()
   action?.kill()
 })
@@ -138,6 +170,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('device', async (input: Json) => {
     const next = String(input.udid ?? '').trim()
     if (next && next !== UDID) {
+      wantStream = false
       stream?.kill(); stream = null
       action?.kill(); action = null
       UDID = next
