@@ -49,7 +49,7 @@ async function loop() {
     }
     if (reply.width) { size = { width: reply.width, height: reply.height } }
     if (reply.error && img.hidden) { empty.textContent = reply.error; empty.hidden = false }
-    meta.textContent = reply.waiting ? '等待首帧…' : `Live · ${sequence} 帧`
+    meta.textContent = reply.waiting ? '等待首帧…' : reply.idle ? `静止画面 · ${sequence}` : `Live · ${sequence} 帧`
   } catch {
     failures += 1
     dot.classList.remove('live')

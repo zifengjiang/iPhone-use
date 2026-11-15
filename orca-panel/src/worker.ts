@@ -113,6 +113,13 @@ async function frame(after: number, timeout: number): Promise<Json> {
     }
   }
   if (!frames) return { sequence, waiting: true }
+  const stale = sequence <= after
+  if (stale) {
+    // The device encoder only emits frames when the screen changes, so an idle phone
+    // would look frozen; a still keeps the panel honest about what is on screen.
+    const still = await call('screenshot').catch(() => null)
+    if (still?.jpeg_b64) return { sequence, jpeg: String(still.jpeg_b64), width: size.width, height: size.height, idle: true }
+  }
   return { sequence, jpeg: frames.toString('base64'), width: size.width, height: size.height }
 }
 
