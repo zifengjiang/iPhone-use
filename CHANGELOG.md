@@ -8,7 +8,8 @@
 - **工具目录合并为一套。** 16 个模型工具 + 2 个 widget 工具，包含 `pua_unlock`、`pua_type_text`、`pua_screen`；`scroll_find`、`collect_list`、`verify`、`replace`、`submit`、`continue_token` 与 `predicate` 等只有 WDA 树能兑现的参数移除。
 - **解锁有前置证明。** 只有 AXe 报告锁屏时 `pua_unlock` 才输入密码，解锁后必须用新的元素树证明成功；没有锁屏密码的测试机不会被误点。
 - **安装只需两条命令。** CoreDevice 助手使用独立 venv（`pymobiledevice3` + `Pillow`），元素树使用 AXe 二进制；`pua_doctor` 直接报告两者与 USB 探测结果。
-- 测试从 422 项收敛为 158 项，删除只覆盖 WDA / iCTRL 的用例，保留并改造截图、点击、解锁、预览、目录契约与打包校验。
+- **任意文字都能输入。** 非 ASCII 文字改走设备剪贴板 + ⌘V 粘贴，中文、emoji 与中英混排都能写进聚焦的输入框；纯 ASCII 仍逐个发 HID 按键，不碰剪贴板。
+- 测试从 422 项收敛为 160 项，删除只覆盖 WDA / iCTRL 的用例，保留并改造截图、点击、解锁、预览、目录契约与打包校验。
 
 ## 0.3.6 — 2026-10-08
 
