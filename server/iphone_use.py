@@ -28,6 +28,7 @@ import wda_image
 PUAError=WDAError
 VERSION="0.3.6"
 SCREEN_URI="ui://iphone-use/phone-0.3.6.html"
+ICTRL_SCREEN_URI="ui://iphone-use/ictrl-screen-0.3.6.html"
 # Codex scopes reuse to the host, chat, server and UI resource. A stable result
 # ID keeps repeated READY/open/pause/resume calls in that chat on one panel,
 # including after the MCP process reconnects; no device identifiers are needed.
@@ -296,13 +297,15 @@ class Runtime:
         # sharing this runtime, and share only this plugin's session identity.
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         validate(args,SCHEMAS[name[4:]]);validate_semantics(name[4:],args)
-        if getattr(self,"backend","wda")=="ictrl" and name not in MCP_TOOLS:
-            unsupported("This tool is unavailable in the iCTRL pilot. Use pua_observe for screenshots.")
-        if name in ("pua_screen","pua_screen_frame","pua_screen_action"):self.identify_device()
-        # Cached preview polling does not share the PUA action/session lock.
-        if name=="pua_screen_frame":return self.screen.frame(**args)
-        if name=="pua_screen_action":return self.screen_action(args["action"])
-        if name=="pua_screen":
+        ictrl=getattr(self,"backend","wda")=="ictrl"
+        if ictrl:
+            if name not in MCP_TOOLS or (name=="pua_screen_action" and args["action"]!="refresh"):
+                unsupported("This tool is unavailable in the iCTRL pilot.")
+        elif name in ("pua_screen","pua_screen_frame","pua_screen_action"):
+            self.identify_device()
+            # Cached WDA preview polling does not share the phone operation lock.
+            if name=="pua_screen_frame":return self.screen.frame(**args)
+            if name=="pua_screen_action":return self.screen_action(args["action"])
             action=args.get("action","open")
             if action=="pause":self.screen.set_paused(True)
             elif action=="resume":self.screen.set_paused(False)
@@ -481,7 +484,9 @@ class Runtime:
     def _call(self,name,args):
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         op=name[4:];validate(args,SCHEMAS[op]);validate_semantics(op,args)
-        if getattr(self,"backend","wda")=="ictrl":return self.phone.run(op,args)
+        if getattr(self,"backend","wda")=="ictrl":
+            if op in ("screen","screen_action"):return self.phone.screen_snapshot(args.get("action","open"))
+            return self.phone.run(op,args)
         start=time.monotonic();error=None;activity=None
         try:
             if op not in ("doctor","apps","setup","metrics"):
@@ -587,15 +592,21 @@ def result_content(data,structured=False):
 
 def tool_result(runtime,params):
     name=params.get("name")
+    ictrl_preview=getattr(runtime,"backend","wda")=="ictrl" and name in ("pua_screen","pua_screen_action")
     try:
         data=runtime.call(name,params.get("arguments",{}))
+        if ictrl_preview:
+            summary={key:value for key,value in data.items() if key!="frame"}
+            result=result_content(summary,structured=True)
+            result["_meta"]={"openai/widgetSessionId":SCREEN_SESSION_ID,"iphone-use/preview":data}
+            return result
         # The preview App reads structuredContent; frames never become model text.
         if name=="pua_screen_frame":return {"content":[],"structuredContent":data,"isError":False}
         result=result_content(data,structured=name in ("pua_screen","pua_screen_action"))
         if name in ("pua_ready","pua_screen") and getattr(runtime,"backend","wda")!="ictrl":
             result["_meta"]={"openai/widgetSessionId":SCREEN_SESSION_ID}
         return result
-    except WDAError as exc:return result_content({"error":exc.as_dict()},structured=name=="pua_screen_action")
+    except WDAError as exc:return result_content({"error":exc.as_dict()},structured=ictrl_preview or name=="pua_screen_action")
     except Exception as exc:
         print("iphone-use tool failure: "+type(exc).__name__,file=sys.stderr)
         return result_content({"error":{"code":"internal_error","message":"Local tool failed; inspect setup status or local stderr.","uncertain":True}})
@@ -624,7 +635,9 @@ ICTRL_INSTRUCTIONS=(
  "then configure the full device ID and use pua_ready. The Runner is started separately. "
  "Use pua_observe(mode=both) for a screenshot and iCTRL's text source. Coordinates are iPhone points; "
  "multiply image pixels by image.pixel_to_point. This pilot supports coordinate taps, swipes, Home and App launch. "
- "No WDA selectors, typing or live screen widget. Never replay a timed-out action; observe fresh state first. "
+ "Use pua_screen to open the snapshot panel; the refresh button takes another snapshot. "
+ "Pause the panel before authentication and resume after the user's confirmation. "
+ "Never replay a timed-out action; observe fresh state first. "
  "If the phone is locked or asks for authentication, wait for the user to complete it."
 )
 
@@ -635,6 +648,8 @@ def ictrl_tool_catalog():
         "pua_doctor":"Report the iCTRL connection configuration and setup steps.",
         "pua_ready":"Verify the paired iCTRL device, unlock state, foreground and viewport.",
         "pua_observe":"Read iCTRL foreground text source, a screenshot, or both.",
+        "pua_screen":"Open or refresh the paired iPhone's screenshot panel over iCTRL. Pause for authentication; resume after the user confirms completion.",
+        "pua_screen_action":"Refresh the paired iPhone's screenshot from the panel.",
         "pua_tap":"Tap by iPhone point coordinates on the selected iCTRL device.",
         "pua_swipe":"Swipe once on the selected iCTRL device.",
         "pua_press_button":"Return to the Home screen through iCTRL.",
@@ -645,10 +660,17 @@ def ictrl_tool_catalog():
     for tool in TOOLS:
         name=tool["name"]
         if name not in MCP_TOOLS:continue
-        item={key:value for key,value in tool.items() if key!="_meta"}
+        item=dict(tool)
         item["description"]=descriptions[name]
         if name=="pua_setup":
             item["inputSchema"]=obj({"action":string(enum=["discover","status"])},("action",))
+        if name=="pua_ready":
+            item.pop("_meta",None)
+        if name=="pua_screen":
+            item["inputSchema"]=obj({"action":string(enum=["open","pause","resume"])})
+            item["_meta"]={**tool["_meta"],"ui":{"resourceUri":ICTRL_SCREEN_URI}}
+        if name=="pua_screen_action":
+            item["inputSchema"]=obj({"action":string(enum=["refresh"])},("action",))
         catalog.append(item)
     return catalog
 
@@ -662,6 +684,7 @@ def serve(runtime):
     """
     ictrl=getattr(runtime,"backend","wda")=="ictrl"
     tools=ictrl_tool_catalog() if ictrl else TOOLS
+    screen_uri=ICTRL_SCREEN_URI if ictrl else SCREEN_URI
     writing=threading.Lock()
     def send(response):
         line=json.dumps(response,ensure_ascii=False,allow_nan=False)
@@ -697,14 +720,15 @@ def serve(runtime):
                 elif method=="ping":result={}
                 elif method=="tools/list":result={"tools":tools}
                 elif method=="resources/list":
-                    result={"resources":[] if ictrl else [{"uri":SCREEN_URI,"name":"iPhone Use Screen","title":"手机屏幕","mimeType":"text/html;profile=mcp-app","_meta":SCREEN_META}]}
+                    result={"resources":[{"uri":screen_uri,"name":"iPhone Use Screen","title":"手机屏幕","mimeType":"text/html;profile=mcp-app","_meta":SCREEN_META}]}
                 elif method=="resources/read":
-                    if ictrl or params.get("uri")!=SCREEN_URI:raise WDAError("invalid_argument","Unknown screen resource URI.")
+                    if params.get("uri")!=screen_uri:raise WDAError("invalid_argument","Unknown screen resource URI.")
                     html=(Path(__file__).resolve().parents[1]/"assets/phone-screen.html").read_text()
-                    result={"contents":[{"uri":SCREEN_URI,"mimeType":"text/html;profile=mcp-app","text":html,"_meta":SCREEN_META}]}
+                    if ictrl:html=html.replace('<main id="app"','<main id="app" data-preview="snapshot"',1)
+                    result={"contents":[{"uri":screen_uri,"mimeType":"text/html;profile=mcp-app","text":html,"_meta":SCREEN_META}]}
                 elif method=="tools/call":
                     arrived=time.monotonic()
-                    if params.get("name") not in ("pua_screen_frame","pua_screen","pua_screen_action"):
+                    if ictrl or params.get("name") not in ("pua_screen_frame","pua_screen","pua_screen_action"):
                         jobs.put((ident,params,arrived));continue
                     # Preview polls, its toolbar and opening or pausing the panel never wait behind a phone operation.
                     result=tool_result(runtime,params)

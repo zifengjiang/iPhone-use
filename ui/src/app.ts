@@ -24,6 +24,7 @@ type Preview = {
   pause_reason?: 'device_locked' | 'authentication' | 'unknown' | null;
   events: Gesture[];
   device?: { model?: string } | null;
+  transport?: 'awdl' | 'lan';
 };
 type LiveState = 'connecting' | 'live' | 'paused' | 'offline';
 type EmptyState = 'connecting' | 'offline' | 'locked' | 'authentication' | 'paused' | 'unavailable';
@@ -51,6 +52,7 @@ const app = new App(
   { availableDisplayModes: ['fullscreen'] },
   { autoResize: false },
 );
+const snapshot = root.dataset.preview === 'snapshot';
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 let ready = false;
 let disposed = false;
@@ -74,7 +76,7 @@ const FRAME_INTERVAL = 250;
 const REQUEST_TIMEOUT = 3000;
 // A screenshot or Home may queue behind the phone operation already running.
 const ACTION_TIMEOUT = 12000;
-const LIVE_TEXT: Record<LiveState, string> = { connecting: '连接中', live: 'Live', paused: '已暂停', offline: '未连接' };
+const LIVE_TEXT: Record<LiveState, string> = { connecting: '连接中', live: snapshot ? 'iCTRL 截图' : 'Live', paused: '已暂停', offline: '未连接' };
 const EMPTY_TEXT: Record<EmptyState, string> = {
   connecting: '正在连接', offline: '未连接', locked: '等待解锁',
   authentication: '请完成认证', paused: '预览已暂停', unavailable: '画面暂不可用',
@@ -85,6 +87,8 @@ const FAILED: Record<string, string> = {
   preview_paused: '认证接管期间已暂停',
   clipboard_unavailable: '截图未能写入剪贴板',
   pua_unreachable: '未连接到手机',
+  ictrl_unreachable: '未发现这台 iPhone 的 iCTRL Runner',
+  ictrl_pairing_required: '需要重新配对 iCTRL',
 };
 
 const validSize = (value: unknown): value is Size => {
@@ -324,6 +328,11 @@ function consume(value: unknown) {
     setLive('offline');
   } else if (preview.frame_available === true || preview.frame) {
     setLive('live');
+    if (snapshot) {
+      const link = preview.transport === 'awdl' ? 'AWDL' : '局域网';
+      liveText.textContent = `iCTRL · ${link} · 截图`;
+      liveText.title = '点击刷新获取当前画面';
+    }
   }
   const frame = preview.frame;
   if (frame && validSize(frame) && Number.isInteger(frame.seq) && frame.seq > frameSeq
@@ -359,7 +368,7 @@ function consume(value: unknown) {
 }
 
 function schedule(delay: number) {
-  if (!visible() || timer) return;
+  if (snapshot || !visible() || timer) return;
   timer = setTimeout(() => {
     timer = undefined;
     void poll();
@@ -413,14 +422,19 @@ async function act(name: ToolName) {
       name: 'pua_screen_action',
       arguments: { action: name },
     }, { timeout: ACTION_TIMEOUT });
-    const data = result.structuredContent as (Partial<Preview> & { service_ready?: boolean; error?: { code?: string } }) | undefined;
+    const data = (result._meta?.['iphone-use/preview'] ?? result.structuredContent) as
+      (Partial<Preview> & { service_ready?: boolean; error?: { code?: string } }) | undefined;
     if (result.isError || data?.error) {
-      if (name === 'refresh' && !image.src) showEmpty(previousEmptyState);
+      if (snapshot && data?.error?.code !== 'device_busy') { clearFrame(); setLive('offline'); }
+      if (!snapshot && name === 'refresh' && !image.src) showEmpty(previousEmptyState);
       notify(FAILED[data?.error?.code ?? ''] ?? '操作未完成，请重试', true);
     } else {
       // A refresh answers with the new stream identity; take the next frame at once.
       if (name === 'refresh') consume(data);
-      notify(name === 'refresh' && data?.service_ready === false ? '未连接到手机，请确认连接后重试' : DONE[name], name === 'refresh' && data?.service_ready === false);
+      if (!snapshot || data?.frame) {
+        notify(name === 'refresh' && data?.service_ready === false ? '未连接到手机，请确认连接后重试'
+          : snapshot ? '已更新截图' : DONE[name], name === 'refresh' && data?.service_ready === false);
+      }
       if (timer) clearTimeout(timer);
       timer = undefined;
       schedule(0);
@@ -507,7 +521,8 @@ function dispose() {
 }
 
 app.ontoolresult = (result) => {
-  if (!result.isError) consume(result.structuredContent);
+  if (!result.isError) consume(result._meta?.['iphone-use/preview'] ?? result.structuredContent);
+  else if (snapshot) { clearFrame(); setLive('offline'); }
   schedule(0);
 };
 app.onhostcontextchanged = (context) => { applyTheme(context?.theme); };
@@ -540,6 +555,13 @@ async function initialize() {
 }
 
 root.dataset.pageVisible = String(visible());
+if (snapshot) {
+  root.setAttribute('aria-label', 'iPhone 截图预览');
+  image.alt = 'iPhone 当前截图';
+  tools.refresh.setAttribute('aria-label', '刷新截图');
+  tools.refresh.title = '获取当前 iPhone 截图';
+  tools.home.hidden = tools.screenshot.hidden = true;
+}
 device.hidden = screen.hidden = false;
 image.hidden = true;
 emptyState.hidden = false;

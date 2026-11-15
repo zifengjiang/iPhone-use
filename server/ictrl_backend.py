@@ -1,4 +1,5 @@
 """Opt-in PUA control through a pre-paired iCTRL runner."""
+import base64
 import hashlib
 import ipaddress
 import json
@@ -15,7 +16,7 @@ from wda_controller import PhoneController, VIEWPORT_TTL, integer
 
 
 SUPPORTED_ACTIONS = {"tap", "swipe", "launch_app", "press_button"}
-MCP_TOOLS = {"pua_setup", "pua_doctor", "pua_ready", "pua_observe", "pua_batch"} | {
+MCP_TOOLS = {"pua_setup", "pua_doctor", "pua_ready", "pua_observe", "pua_batch", "pua_screen", "pua_screen_action"} | {
     f"pua_{action}" for action in SUPPORTED_ACTIONS
 }
 _ID = re.compile(r"[a-zA-Z0-9-]{4,64}")
@@ -167,6 +168,30 @@ class IctrlClient:
 
 
 class IctrlController(PhoneController):
+    def screen_snapshot(self, action):
+        pause_file = self.state_dir / "preview-paused"
+        if action == "pause":
+            pause_file.touch(mode=0o600)
+        if pause_file.exists() and action != "resume":
+            return {"paused": True, "pause_reason": "authentication"}
+        try:
+            info = self.client.rpc("device_info")
+            self.ensure_unlocked()
+            viewport = self.viewport(VIEWPORT_TTL)
+            capture = self.capture(viewport)
+        except WDAError as error:
+            if error.code == "phone_locked":
+                return {"paused": True, "pause_reason": "device_locked"}
+            raise
+        row = self.client.connection[0]
+        name = info.get("name") or info.get("device_name") or row.get("name") or "iPhone"
+        frame = {key: capture[key] for key in ("width", "height", "mimeType")}
+        frame.update(seq=time.monotonic_ns() // 1000, data=base64.b64encode(Path(capture["path"]).read_bytes()).decode())
+        if action == "resume":
+            pause_file.unlink(missing_ok=True)
+        return {"paused": False, "transport": row["channel"], "device": {"model": str(name)[:60]},
+                "viewport": viewport, "frame": frame}
+
     def observe(self, mode="tree", include_invisible=False, max_nodes=100, expensive_visibility=False):
         if include_invisible or expensive_visibility:
             unsupported("The iCTRL pilot returns only the Runner's visible source.")

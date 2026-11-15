@@ -17,7 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 from ictrl_backend import IctrlClient
-from iphone_use import Runtime, tool_result
+from iphone_use import ICTRL_SCREEN_URI, Runtime, tool_result
 from vendor import ictrl_rpc as wire
 from wda_client import WDAError
 
@@ -152,19 +152,43 @@ class IctrlBackendTests(unittest.TestCase):
         self.assertEqual(result.exception.code, "ictrl_unsupported")
         self.assertEqual(self.methods, [])
 
-    def test_opt_in_stdio_catalog_omits_wda_only_tools_and_preview(self):
+    def test_snapshot_panel_reads_iCTRL_without_polling_or_bypassing_pause(self):
+        def screen(name="pua_screen", **arguments):
+            return tool_result(self.runtime, {"name": name, "arguments": arguments})
+
+        opened = screen()
+        preview = opened["_meta"]["iphone-use/preview"]
+        self.assertEqual((preview["transport"], preview["device"]["model"]), ("lan", "Test iPhone"))
+        self.assertEqual(base64.b64decode(preview["frame"]["data"]), png(200, 400))
+        self.assertNotIn("frame", opened["structuredContent"])
+        self.assertEqual(screen(action="pause")["structuredContent"]["pause_reason"], "authentication")
+        self.assertTrue(screen("pua_screen_action", action="refresh")["structuredContent"]["paused"])
+        self.assertEqual(sum(method == "screenshot" for method, _ in self.methods), 1)
+        self.locked = True
+        self.assertEqual(screen(action="resume")["structuredContent"]["pause_reason"], "device_locked")
+        self.assertTrue(screen()["structuredContent"]["paused"])
+        self.locked = False
+        resumed = screen(action="resume")["_meta"]["iphone-use/preview"]
+        refreshed = screen("pua_screen_action", action="refresh")["_meta"]["iphone-use/preview"]
+        self.assertGreater(refreshed["frame"]["seq"], resumed["frame"]["seq"])
+
+    def test_opt_in_stdio_exposes_snapshot_widget_and_omits_wda_only_tools(self):
         requests = [{"jsonrpc": "2.0", "id": i, "method": method} for i, method in
                     enumerate(("initialize", "tools/list", "resources/list"))]
+        requests.append({"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": ICTRL_SCREEN_URI}})
         result = subprocess.run([sys.executable, str(ROOT / "server/iphone_use.py"), "--state-dir", str(self.state / "stdio")],
                                 input="".join(json.dumps(r) + "\n" for r in requests), text=True, capture_output=True, check=True,
                                 env={**os.environ, "IPHONE_USE_BACKEND": "ictrl"}, timeout=8)
-        hello, tools, resources = [json.loads(line)["result"] for line in result.stdout.splitlines()]
+        hello, tools, resources, resource = [json.loads(line)["result"] for line in result.stdout.splitlines()]
         self.assertEqual(hello["serverInfo"]["name"], "iphone-use-ictrl")
         names = {tool["name"] for tool in tools["tools"]}
         self.assertIn("pua_tap", names)
         self.assertNotIn("pua_type_text", names)
-        self.assertNotIn("pua_screen", names)
-        self.assertEqual(resources["resources"], [])
+        self.assertNotIn("pua_screen_frame", names)
+        screen = next(tool for tool in tools["tools"] if tool["name"] == "pua_screen")
+        self.assertEqual(screen["_meta"]["ui"]["resourceUri"], ICTRL_SCREEN_URI)
+        self.assertEqual(resources["resources"][0]["uri"], ICTRL_SCREEN_URI)
+        self.assertIn('data-preview="snapshot"', resource["contents"][0]["text"])
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ const preview = (fields = {}) => ({ server_time: 1000, frame: null, viewport: nu
 // Fixtures exist only in this isolated DOM test, never in the shipped widget.
 const frame = (seq = 1) => ({ seq, data: 'test-image-only', mimeType: 'image/png', width: 900, height: 1800 });
 
-async function harness({ reducedMotion = false, context = { displayMode: 'inline', availableDisplayModes: ['fullscreen'] }, reply, connectReply } = {}) {
+async function harness({ reducedMotion = false, snapshot = false, context = { displayMode: 'inline', availableDisplayModes: ['fullscreen'] }, reply, connectReply } = {}) {
   let now = 0;
   let timerId = 0;
   let instance;
@@ -35,6 +35,7 @@ async function harness({ reducedMotion = false, context = { displayMode: 'inline
     addEventListener(name, fn) { this.handlers.set(name, fn); },
     removeEventListener(name) { this.handlers.delete(name); },
     click() { this.handlers.get('click')?.(); },
+    setAttribute(name, value) { this[name] = value; },
     removeAttribute(name) { delete this[name]; },
     cloneNode() { return { ...this, style: { ...this.style }, dataset: { ...this.dataset }, children: [], animation: undefined }; },
     appendChild(node) { this.children.push(node); node.parent = this; return node; },
@@ -45,6 +46,7 @@ async function harness({ reducedMotion = false, context = { displayMode: 'inline
       return animation;
     },
   }]));
+  if (snapshot) elements.app.dataset.preview = 'snapshot';
   // The stage is the area left between the status pill and the toolbar; reading it is a layout read.
   const stageSize = { width: 376, height: 776 };
   Object.defineProperty(elements.stage, 'clientWidth', { configurable: true, get: () => { layoutReads++; return stageSize.width; } });
@@ -108,6 +110,27 @@ test('connects before requesting only fullscreen, then polls only the app frame 
   assert.equal(JSON.stringify(h.calls[0].arguments), '{"after_seq":0,"last_event_id":0}');
   assert.equal([...h.timers.values()][0].delay, 250);
   assert.equal(h.requestOptions[0].timeout, 3000);
+});
+
+test('iCTRL snapshot shows the paired device and refreshes only on request', async () => {
+  const update = seq => ({ _meta: { 'iphone-use/preview': preview({
+    frame: frame(seq), device: { model: 'Test iPhone' }, transport: 'awdl',
+  }) } });
+  const h = await harness({ snapshot: true, reply: async () => update(2) });
+  h.app.ontoolresult(update(1));
+  assert.equal(h.elements.model.textContent, 'Test iPhone');
+  assert.equal(h.elements['live-text'].textContent, 'iCTRL · AWDL · 截图');
+  assert.equal(h.elements.app.dataset.frameSeq, '1');
+  assert.equal(h.elements['tool-home'].hidden, true);
+  await h.tick();
+  assert.equal(h.calls.length, 0);
+  h.elements['tool-refresh'].click();
+  await flush();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].name, 'pua_screen_action');
+  assert.equal(h.elements.app.dataset.frameSeq, '2');
+  h.app.ontoolresult({ structuredContent: preview({ paused: true, pause_reason: 'authentication' }) });
+  assert.equal(h.elements.image.src, undefined);
 });
 
 test('preserves full frame aspect ratio and maps gestures using the point viewport', async () => {

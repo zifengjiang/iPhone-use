@@ -5,6 +5,8 @@ description: 配置 PUA（Phone Use Agent），在用户自己的 iPhone 上安�
 
 # 把 iPhone 配置为 READY
 
+如果当前 iPhone Use 配置使用 iCTRL，先用 `pua_ready` 验证已配对的 Runner。发现失败时用 `pua_setup(action="discover")` 核对目标设备，确认 iCTRL Runner 已启动并允许附近发现。需要首次配对时由 iCTRL 完成。使用 `pua_screen()` 打开 Codex 截图面板。以下安装与恢复流程适用于 USB 后端。
+
 使用本插件的 MCP 工具完成可重复的探测、构建、启动和连接；不要在每次任务中临时生成 Python 客户端。已有可用 PUA 时先复用，避免每个任务都重建或重装。
 
 ## 先确定当前状态

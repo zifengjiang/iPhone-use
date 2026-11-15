@@ -39,7 +39,7 @@ iPhone Use 使用 [WebDriverAgent](https://github.com/appium/WebDriverAgent)（W
      -- python3 /absolute/path/to/iPhone-use/server/iphone_use.py
    ```
 
-当前覆盖 READY、iCTRL 文本树和 PNG 截图、坐标点击、滑动、Home、启动或切换 App，以及上述操作的批处理。`pua_observe(mode="both")` 同时返回文本树和图片，坐标换算使用 `image.pixel_to_point`。文字输入、WDA 选择器、实时 widget 和跨主机接管租约尚未接入。Runner 的启动、停止和配对由 iCTRL 管理。动作超时后先观察当前页面再决定是否重试。
+当前覆盖 READY、iCTRL 文本树和截图、坐标点击、滑动、Home、启动或切换 App，以及上述操作的批处理。`pua_screen()` 打开 Codex 截图面板，点击刷新获取一帧当前画面。`pua_observe(mode="both")` 同时返回文本树和图片，坐标换算使用 `image.pixel_to_point`。Runner 的启动、停止和配对由 iCTRL 管理。动作超时后先观察当前页面再决定是否重试。
 
 ## 用一段提示词让 Codex 安装
 
