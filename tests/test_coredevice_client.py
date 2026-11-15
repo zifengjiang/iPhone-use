@@ -80,3 +80,18 @@ class CoreDeviceClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_set_udid_retargets_without_restarting_the_plugin(self):
+        self.assertEqual(self.client.set_udid("first"), "first")
+        self.assertEqual(self.client.udid, "first")
+        self.assertEqual(self.client.set_udid(" second "), "second")
+        self.assertEqual(self.client.udid, "second")
+        self.assertIsNone(self.client.set_udid(None))
+
+    def test_set_udid_stops_the_running_helper(self):
+        self.client.call("info")
+        process = self.client.process
+        self.assertIsNotNone(process)
+        self.client.set_udid("another")
+        self.assertNotEqual(process.poll(), None)
+        self.assertIsNone(self.client.process)

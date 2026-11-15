@@ -30,6 +30,15 @@ class CoreDeviceClient:
         self.replies = queue.Queue()
         self.sequence = 0
 
+    def set_udid(self, udid):
+        """Retarget the helper; the next call spawns it against the new device."""
+        udid = (udid or "").strip() or None
+        if udid == self.udid:
+            return self.udid
+        self.close()
+        self.udid = udid
+        return self.udid
+
     def available(self):
         """True when a helper can actually be started; the device itself is probed on first call."""
         return bool(self.python) and Path(self.python).is_file() and HELPER.is_file()
@@ -118,6 +127,7 @@ class CoreDeviceClient:
         return reply.get("result") or {}
 
     def close(self):
+        """Stop the helper and forget the tunnel; a new one starts on the next call."""
         if self.process is not None and self.process.poll() is None:
             try:
                 self.process.stdin.write(json.dumps({"id": 0, "op": "quit", "args": {}}) + "\n")

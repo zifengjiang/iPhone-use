@@ -123,7 +123,7 @@ class HybridBackendTests(unittest.TestCase):
     def test_unlock_reports_the_resulting_lock_state(self):
         result = self.phone.run("unlock", {})
         self.assertEqual(result["locked"], False)
-        self.assertEqual(self.core.calls, [("unlock", {"passcode": "1234", "interval": 0.45})])
+        self.assertEqual(self.core.calls, [("unlock", {"passcode": "1234", "interval": 0.25})])
 
     def test_ensure_unlocked_raises_without_a_passcode(self):
         with patch.dict(os.environ, {"IPHONE_USE_UNLOCK_PASSCODE": ""}):
@@ -201,3 +201,9 @@ class HybridBackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_set_device_rebinds_coredevice_and_drops_cached_size(self):
+        self.phone.run("tap", {"x": 10, "y": 10})
+        self.assertEqual(self.phone.set_device("another-udid"), "another-udid")
+        self.assertEqual(self.core.udid, "another-udid")
+        self.assertIsNone(self.phone._point_size)

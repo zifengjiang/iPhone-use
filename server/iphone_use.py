@@ -81,13 +81,13 @@ SCHEMAS={
  "tap":obj({"selector":SEL,"x":num(0,10000),"y":num(0,10000),"observation_id":string("Optional ID from this Runtime. Checks app/viewport context, not whole-page pixel equality or age."),**EXPECT}),
  "swipe":obj({"direction":string("Finger movement; up usually reveals later rows. Default up.",enum=["up","down","left","right"]),"region":REGION,"observation_id":string("Optional ID from this Runtime; checks app/viewport context, not numeric/carousel text changes or age."),"expect":SEL,"verify":{**VERIFY,"description":"False: one gesture, no XML checks. True: check anchor movement once; failure returns a screenshot before another action. Numeric refresh is not progress."},"max_attempts":{**num(1,2,"integer"),"default":1,"description":"Legacy limit; even 2 stops after the first unproven gesture for screenshot inspection."},"observe":OBS}),
  "type_text":obj({"selector":SEL,"text":string("Full text to enter. Required with selector unless continue_token is given.",max_length=10000),"allow_newlines":BOOL,"submit":BOOL,"replace":BOOL,"verify":{**VERIFY,"description":"Default false enters the full intended text once without value readback. True checks exact value and stops before submit on mismatch. Secure fields require user takeover."},**EXPECT,"continue_token":string("Token from a result with input_complete=false. Pass it alone to type the rest of that text with its original options.",max_length=64)}),
- "press_button":obj({"name":string(enum=["home","volumeup","volumedown"]),"verify":VERIFY,**EXPECT},("name",)),
+ "press_button":obj({"name":string(enum=["home","volumeup","volumedown","lock"]),"verify":VERIFY,**EXPECT},("name",)),
  "launch_app":obj({"bundle_id":string(),"verify":VERIFY,**EXPECT},("bundle_id",)),
  "wait":obj({"selector":SEL,"timeout_seconds":num(0,20)},("selector",)),
  "scroll_find":obj({"selector":SEL,"direction":string("Finger movement; up usually reveals later rows.",enum=["up","down","left","right"]),"max_swipes":{**num(0,10,"integer"),"default":1,"description":"0 only queries; positive legacy limits allow at most one swipe, then an unresolved target returns a screenshot for the next decision."}},("selector",)),
  "collect_list":obj({"row_type":string(),"max_pages":num(1,10,"integer"),"end_selector":SEL}),
  "apps":obj({"query":string(max_length=100),"country":string(max_length=2),"source":string(enum=["auto","catalog","installed","apple"]),"limit":num(1,30,"integer")},("query",)),
- "doctor":obj({}),"ready":obj({"screenshot":{"type":"boolean","default":True,"description":"Also verify screenshot; false retains status/session/source/viewport/unlock checks."},"recover":{"type":"boolean","default":True,"description":"Normal task startup: omit or set true, so a persistent local.pid/XCTest fault can queue one bounded restart of a proven owned PUA. Use false only for an explicitly requested diagnostic/no-restart check, not a routine precheck. False is respected and returns ready=false, state=recovery_required when restart is needed; queued recovery returns state=recovering. Neither state proves readiness."}}),"metrics":obj({"reset":{"type":"boolean","default":False,"description":"Return the totals, then start a new measurement window."}}),
+ "doctor":obj({}),"ready":obj({"device":{"type":"string","maxLength":64,"description":"CoreDevice UDID to drive from now on."},"ictrl_device":{"type":"string","maxLength":64,"description":"iCTRL Runner id to bind beside it; needed when the Runner lives on another phone."},"screenshot":{"type":"boolean","default":True,"description":"Also verify screenshot; false retains status/session/source/viewport/unlock checks."},"recover":{"type":"boolean","default":True,"description":"Normal task startup: omit or set true, so a persistent local.pid/XCTest fault can queue one bounded restart of a proven owned PUA. Use false only for an explicitly requested diagnostic/no-restart check, not a routine precheck. False is respected and returns ready=false, state=recovery_required when restart is needed; queued recovery returns state=recovering. Neither state proves readiness."}}),"metrics":obj({"reset":{"type":"boolean","default":False,"description":"Return the totals, then start a new measurement window."}}),
  "setup":obj({"action":string(enum=["discover","fetch","configure","build","start","stop","status"]),"udid":string(),"team_id":string(),"bundle_id":string(),"source_dir":string(max_length=4096),"local_port":num(1024,65535,"integer"),"device_port":num(1024,65535,"integer"),"job_id":string()},("action",))
 }
 # Each batch operation carries the same closed argument schema as its standalone tool.
@@ -437,7 +437,8 @@ class Runtime:
         sid=self.client.ensure_session()
         observation=self.phone.observe("both" if screenshot else "tree")
         if observation.get("total_nodes",0)==0 and self.setup_manager.mirroring_running():raise WDAError("mirroring_conflict","iPhone Mirroring is running and PUA exposes an empty phone tree. Quit Mirroring, unlock if needed, then verify READY again.")
-        result={"ready":True,"state":"ready","proof":{"status_ready":True,"phone_unlocked":True,"session_usable":bool(sid),"foreground_resolved":True,"source_readable":True,"viewport_readable":True,"screenshot_readable":screenshot},"observation":observation}
+        core=getattr(self.phone,"core",None)
+        result={"ready":True,"state":"ready"+(f" (device {core.udid})" if core is not None and core.udid else ""),"proof":{"status_ready":True,"phone_unlocked":True,"session_usable":bool(sid),"foreground_resolved":True,"source_readable":True,"viewport_readable":True,"screenshot_readable":screenshot},"observation":observation}
         try:
             self.screen.resume_after_unlock(lock_pause)
             result["preview"]=self.screen.pause_status()
@@ -504,6 +505,13 @@ class Runtime:
         op=name[4:];validate(args,SCHEMAS[op]);validate_semantics(op,args)
         if getattr(self,"backend","wda") in ("ictrl","hybrid"):
             if op in ("screen","screen_action"):return self.phone.screen_snapshot(args.get("action","open"))
+            if op=="ready":
+                device=args.pop("device",None);ictrl=args.pop("ictrl_device",None)
+                if device or ictrl:
+                    if getattr(self,"core",None) is not None:
+                        self.phone.set_device(device or self.phone.core.udid,ictrl)
+                    elif ictrl:
+                        self.phone.client.target=ictrl;self.phone.client.close()
             return self.phone.run(op,args)
         start=time.monotonic();error=None;activity=None
         try:
@@ -670,7 +678,7 @@ def ictrl_tool_catalog(hybrid=False):
         "pua_screen_action":"Refresh the paired iPhone's screenshot from the panel.",
         "pua_tap":"Tap by iPhone point coordinates on the selected iCTRL device.",
         "pua_swipe":"Swipe once on the selected iCTRL device.",
-        "pua_press_button":"Return to the Home screen through iCTRL.",
+        "pua_press_button":"Return to the Home screen through iCTRL. lock needs the hybrid backend.",
         "pua_launch_app":"Activate an App by bundle ID through iCTRL.",
         "pua_batch":"Run a short batch of supported iCTRL operations. Stops on errors.",
     }

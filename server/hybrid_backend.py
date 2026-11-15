@@ -28,7 +28,7 @@ _CORE_FIRST = {"tap", "swipe"}
 # The Runner reads the source tree to name the foreground app; reuse it across
 # observations that no action separates.
 APP_CACHE_SECONDS = 2.0
-_BUTTONS = {"home": "home", "volumeup": "volumeup", "volumedown": "volumedown"}
+_BUTTONS = {"home": "home", "volumeup": "volumeup", "volumedown": "volumedown", "lock": "lock"}
 
 
 class HybridController(IctrlController):
@@ -42,48 +42,37 @@ class HybridController(IctrlController):
         self.passcode = (os.environ.get("IPHONE_USE_UNLOCK_PASSCODE") or "").strip()
         self._point_size = None
         self._app_cache = None
+        self._ictrl_trusted = True
 
     # -- coordinates ------------------------------------------------------
     def viewport(self, max_age=0):
-        try:
-            viewport = super().viewport(max_age)
-        except WDAError as error:
-            if error.code not in _RUNNER_DOWN or not self._point_size:
-                raise
-            # The Runner is gone; keep the geometry the phone already proved so a
-            # CoreDevice screenshot still reports the point scale it was taken at.
-            width, height = self._point_size
-            return {"width": width, "height": height, "units": "iPhone points"}
-        self._point_size = (viewport["width"], viewport["height"])
-        return viewport
+        """Points come from the phone that is actually being driven.
 
-    def active_app(self):
-        """The Runner answers this by reading the whole source: ~0.9 s, so keep it briefly.
-
-        Actions clear the cache (see after()), which is the only thing that can move
-        the foreground app; two observations in a row reuse one read.
+        CoreDevice reports the display's native size and UI scale, so a tap stays correct
+        even when the Runner is answering for a different phone.
         """
-        now = time.monotonic()
-        if self._app_cache is not None and now - self._app_cache[1] < APP_CACHE_SECONDS:
-            return self._app_cache[0]
-        try:
-            app = super().active_app()
-        except WDAError as error:
-            if error.code not in _RUNNER_DOWN or not self.core.available():
-                raise
-            # CoreDevice exposes no foreground-app query; a screenshot is still worth
-            # taking, so the observation says the app is unknown instead of failing.
-            app = "unknown"
-        self._app_cache = (app, now)
-        return app
-
-    def after(self, expect=None, observe="none", max_nodes=100):
-        self._app_cache = None  # An action may have moved the foreground app.
-        return super().after(expect=expect, observe=observe, max_nodes=max_nodes)
+        width, height = self.point_size()
+        if width and height:
+            return {"width": width, "height": height, "units": "iPhone points"}
+        raise WDAError("coredevice_unavailable", "The viewport is unavailable: no Runner and no display info.")
 
     def point_size(self):
-        if self._point_size is None:
-            self.viewport(VIEWPORT_TTL)
+        if self._point_size is not None:
+            return self._point_size
+        if not self._ictrl_trusted and self.core.available():
+            info = self.core.call("info")
+            size = (info.get("point_width") or 0, info.get("point_height") or 0)
+            if all(size):
+                self._point_size = size
+                return self._point_size
+        try:
+            viewport = super().viewport(VIEWPORT_TTL)
+        except WDAError as error:
+            if error.code not in _RUNNER_DOWN:
+                raise
+            raise WDAError("coredevice_unavailable", "The viewport is unknown: the Runner is gone and CoreDevice "
+                                                     "did not report a display size.") from error
+        self._point_size = (viewport["width"], viewport["height"])
         return self._point_size
 
     def _fraction(self, x, y):
@@ -93,6 +82,25 @@ class HybridController(IctrlController):
         return x / width, y / height
 
     # -- screenshots ------------------------------------------------------
+    def set_device(self, udid, ictrl_device=None):
+        """Retarget the device for the rest of the session; no restart, no env change.
+
+        The iCTRL Runner answers for the phone it runs on. When only CoreDevice moves,
+        the Runner's tree and lock state describe a different phone, so they stop being
+        trusted until ``ictrl_device`` names a Runner on the new target.
+        """
+        previous = self.core.udid
+        self.core.set_udid(udid)
+        if ictrl_device:
+            self.client.target = ictrl_device
+            self.client.close()
+            self._ictrl_trusted = True
+        elif self.core.udid != previous:
+            self._ictrl_trusted = False
+        self._point_size = None
+        self._app_cache = None
+        return self.core.udid
+
     def capture(self, viewport):
         """CoreDevice answers a USB screenshot in ~0.07 s; iCTRL needs ~0.37 s for the same frame.
 
@@ -120,12 +128,14 @@ class HybridController(IctrlController):
     # -- lock screen ------------------------------------------------------
     def lock_state(self):
         """True/False, or None when neither backend can answer."""
+        if not self._ictrl_trusted:
+            return None  # Only the Runner can answer; ask the wrong phone and the answer is a lie.
         try:
             return self.client.rpc("is_locked").get("locked")
         except WDAError:
             return None
 
-    def unlock(self, passcode=None, interval=0.45):
+    def unlock(self, passcode=None, interval=0.25):
         code = (passcode or self.passcode or "").strip()
         if not code:
             unsupported("Set IPHONE_USE_UNLOCK_PASSCODE or pass the passcode to unlock.")
@@ -140,6 +150,12 @@ class HybridController(IctrlController):
             return {"locked": False, "unlocked": False, "duration_ms": 0, "backend": "coredevice"}
         reply = self.core.call("unlock", passcode=code, interval=float(interval))
         locked = self.lock_state()
+        if locked is None:
+            # No Runner on this phone: the helper proved it from the frame instead.
+            unlocked = bool(reply.get("unlocked"))
+            return {"locked": not unlocked, "unlocked": unlocked, "verified": "screenshot",
+                    "attempts": reply.get("attempts"), "duration_ms": reply.get("duration_ms"),
+                    "backend": "coredevice"}
         return {"locked": locked, "unlocked": locked is False, "duration_ms": reply.get("duration_ms"),
                 "backend": "coredevice"}
 
@@ -208,6 +224,8 @@ class HybridController(IctrlController):
             if isinstance(result, dict):
                 result["backend"] = "hybrid"
                 result["coredevice"] = self.core.available()
+                if self.core.udid:
+                    result["device"] = self.core.udid
             return result
         if op == "unlock":
             return self.unlock(**args)

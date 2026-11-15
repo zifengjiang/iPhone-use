@@ -64,6 +64,21 @@ def model_jpeg(data):
             "encoded_width": target[0], "encoded_height": target[1]}
 
 
+def similar_frames(first, second, threshold=6.0):
+    """Mean absolute difference of two downscaled greyscale frames.
+
+    Two frames of the same lock screen land near 0; an unlocked phone differs by
+    tens of levels because the pad is gone.
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageChops, ImageStat
+        small = [Image.open(BytesIO(data)).convert("L").resize((32, 32)) for data in (first, second)]
+        return ImageStat.Stat(ImageChops.difference(*small)).mean[0] <= threshold
+    except Exception:  # noqa: BLE001 - Pillow missing must not break the unlock attempt
+        return False
+
+
 def png_size(data):
     if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
         return None
@@ -77,15 +92,51 @@ class Device:
         self.hid = None
         self.hid_cm = None
         self.size = None
+        self.points_cache = None
+        self.keyboard_id = None
         self.last_hid_use = 0.0
         self.last_capture_use = 0.0
+
+    async def resolve(self):
+        """Without a configured UDID, only a single USB device is unambiguous.
+
+        Network devices are invisible to usbmuxd and remotepairingd hands out whichever
+        device it likes when asked without a serial, so guessing is not an option.
+        """
+        if self.udid:
+            return self.udid
+        from pymobiledevice3.usbmux import list_devices
+        connected = [device for device in await list_devices() if getattr(device, "is_usb", False)]
+        if len(connected) == 1:
+            self.udid = getattr(connected[0], "serial", None) or getattr(connected[0], "udid", None)
+            return self.udid
+        names = ", ".join(str(getattr(device, "serial", "")) for device in connected) or "none"
+        raise RuntimeError(f"IPHONE_USE_COREDEVICE_UDID is not set and {len(connected)} USB device(s) are attached ({names}). "
+                           "Pass device=<udid> or set the variable.")
 
     async def tunnel(self):
         if self.rsd is not None:
             return self.rsd
         from pymobiledevice3.remote.native_tunnel import establish_native_rsd
-        self.rsd = await establish_native_rsd(self.udid)
+        self.rsd = await establish_native_rsd(await self.resolve())
         return self.rsd
+
+    async def points(self):
+        """UI size in points: nativeSize divided by the UI scale the display reports."""
+        if self.points_cache is not None:
+            return self.points_cache
+        from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
+        width, height = self.size or (0, 0)
+        try:
+            async with DeviceInfoService(await self.tunnel()) as service:
+                info = await service.get_display_info()
+            display = next((item for item in info.get("displays", []) if item.get("primary")), None) or {}
+            native = display.get("nativeSize") or [width, height]
+            scale = (display.get("currentMode") or {}).get("preferredUIScale") or 3
+            self.points_cache = (round(native[0] / scale), round(native[1] / scale))
+        except Exception:  # noqa: BLE001 - the pixel size still gives a usable fallback
+            self.points_cache = (round(width / 3), round(height / 3)) if width else (0, 0)
+        return self.points_cache
 
     async def stream(self):
         """A live media stream is the auth gate for HID; keep it warm while acting."""
@@ -101,6 +152,7 @@ class Device:
         return self.hid
 
     async def drop_stream(self):
+        self.keyboard_id = None
         stream, self.hid = self.hid, None
         context, self.hid_cm = self.hid_cm, None
         if context is not None:
@@ -136,6 +188,33 @@ class Device:
             return data
         raise RuntimeError(f"screenshot failed twice: {type(error).__name__}: {error}") from error
 
+    async def unlock(self, passcode, interval=0.25, attempts=2):
+        """Wake, open the passcode pad, type, and prove it worked from the frame.
+
+        Keystrokes over the network transport occasionally drop (measured 4 of 6),
+        and the pad screenshot is the only signal the phone gives without a Runner:
+        if the frame still looks like the pad, delete and type again.
+        """
+        started = time.monotonic()
+        await self.tap(0.5, 0.4)
+        await asyncio.sleep(0.8)
+        await self.swipe(0.5, 0.99, 0.5, 0.60, 0.45, steps=16)
+        await asyncio.sleep(2.6)
+        pad = await self.shot()
+        unlocked = False
+        for attempt in range(1, attempts + 1):
+            await self.write(passcode, char_delay=interval)
+            await asyncio.sleep(1.2)
+            if not similar_frames(pad, await self.shot()):
+                unlocked = True
+                break
+            for _ in range(len(passcode)):
+                await self.key("backspace")
+                await asyncio.sleep(0.12)
+            await asyncio.sleep(0.8)
+        return {"duration_ms": round((time.monotonic() - started) * 1000), "digits": len(passcode),
+                "attempts": attempt, "unlocked": unlocked}
+
     async def tap(self, x, y, hold=0.05):
         from pymobiledevice3.remote.core_device.hid_service import TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE
         service = await self.stream()
@@ -158,10 +237,18 @@ class Device:
         await service.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, int(round(tx * 65535)), int(round(ty * 65535)))
         self.last_hid_use = time.monotonic()
 
+    async def keyboard(self):
+        """Register the virtual keyboard once per stream; reports address that id."""
+        service = await self.stream()
+        if self.keyboard_id is None:
+            self.keyboard_id = await service.create_keyboard_service()
+        return service, self.keyboard_id
+
     async def write(self, text, char_delay=0.04):
         from pymobiledevice3.remote.core_device.hid_service import ASCII_TO_HID, KEY_LEFT_SHIFT
-        service = await self.stream()
-        keyboard = await service.create_keyboard_service()
+        service, keyboard = await self.keyboard()
+        await service.send_keyboard(keyboard, ())  # a bare report settles dtuhidd before the first key
+        await asyncio.sleep(max(char_delay, 0.2))
         for char in text:
             mapping = ASCII_TO_HID.get(char)
             if mapping is None:
@@ -180,8 +267,7 @@ class Device:
     async def key(self, name):
         from pymobiledevice3.remote.core_device import hid_service as keys
         usage = getattr(keys, "KEY_" + NAMED_KEYS[name].upper())
-        service = await self.stream()
-        keyboard = await service.create_keyboard_service()
+        service, keyboard = await self.keyboard()
         await service.send_keyboard(keyboard, (usage,))
         await asyncio.sleep(0.05)
         await service.send_keyboard(keyboard, ())
@@ -218,7 +304,9 @@ async def run(device, op, args):
         if device.size is None:
             await device.shot()
         width, height = device.size or (0, 0)
-        return {"udid": device.udid, "pixel_width": width, "pixel_height": height, "transport": "coredevice"}
+        points = await device.points()
+        return {"udid": device.udid, "pixel_width": width, "pixel_height": height,
+                "point_width": points[0], "point_height": points[1], "transport": "coredevice"}
     if op == "screenshot":
         started = time.monotonic()
         data = await device.shot()
@@ -255,18 +343,8 @@ async def run(device, op, args):
     if op == "launch":
         return await device.launch(args["bundle_id"], args.get("terminate_existing", True))
     if op == "unlock":
-        started = time.monotonic()
-        # Wake, then drag from the bottom edge: iOS shows Face ID first and only
-        # reveals the passcode pad after it gives up, so the pause covers both.
-        await device.tap(0.5, 0.4)
-        await asyncio.sleep(0.8)
-        await device.swipe(0.5, 0.99, 0.5, 0.60, 0.45, steps=16)
-        await asyncio.sleep(2.6)
-        # Typing beats tapping the keypad: coordinate taps on the pad drop reports
-        # under load (measured 2 of 6), the keyboard delivers every keystroke.
-        await device.write(args["passcode"], char_delay=args.get("interval", 0.25))
-        await asyncio.sleep(1.0)
-        return {"duration_ms": round((time.monotonic() - started) * 1000), "digits": len(args["passcode"])}
+        return await device.unlock(args["passcode"], interval=args.get("interval", 0.45),
+                                   attempts=int(args.get("attempts", 2)))
     raise ValueError(f"unknown op: {op}")
 
 
