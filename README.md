@@ -41,6 +41,30 @@ iPhone Use 使用 [WebDriverAgent](https://github.com/appium/WebDriverAgent)（W
 
 当前覆盖 READY、iCTRL 文本树和截图、坐标点击、滑动、Home、启动或切换 App，以及上述操作的批处理。`pua_screen()` 打开 Codex 截图面板，点击刷新获取一帧当前画面。`pua_observe(mode="both")` 同时返回文本树和图片，坐标换算使用 `image.pixel_to_point`。Runner 的启动、停止和配对由 iCTRL 管理。动作超时后先观察当前页面再决定是否重试。
 
+## CoreDevice 混合后端
+
+`IPHONE_USE_BACKEND=hybrid` 让同一台进程同时使用 iCTRL 与 CoreDevice：图形交给 CoreDevice，文本树留在 iCTRL。适用于既想拿结构化页面、又需要锁屏状态下操作的场景。
+
+1. 安装独立解释器与依赖（CoreDevice 由另一个进程承载，主进程不需要 `pymobiledevice3`）：
+
+   ```bash
+   /opt/homebrew/bin/python3 -m venv ~/.local/share/iphone-use-coredevice/venv
+   ~/.local/share/iphone-use-coredevice/venv/bin/pip install pymobiledevice3 Pillow
+   ```
+
+2. 指定两台后端的目标：iCTRL 用完整 `device_id`，CoreDevice 用 `devicectl` 里的设备 UDID。
+
+   ```bash
+   export IPHONE_USE_BACKEND=hybrid
+   export IPHONE_USE_ICTRL_DEVICE_ID='<完整 device_id>'
+   export IPHONE_USE_COREDEVICE_UDID='00008150-0000000000000001'
+   export IPHONE_USE_UNLOCK_PASSCODE='<锁屏密码，可选>'
+   ```
+
+3. 验证：`pua_ready` 返回 `backend: "hybrid"` 与 `coredevice: true`；`pua_unlock` 在设备锁屏时用 CoreDevice 手势输入密码并返回 `locked: false`；`pua_lockstate` 报告锁态（CoreDevice 在 iOS 27.2.1 未实现该查询，返回 `null` 表示两边都答不了）。
+
+分工：截图、坐标点击、滑动、Home/音量键、打字、解锁走 CoreDevice（热身后点击 52ms，Runner 约 1.1s）；文本树、页面元素、启动 App 仍走 iCTRL。Runner 掉线时截图与坐标动作自动降级到 CoreDevice，`app` 字段退化为 `unknown`；CoreDevice 超时的动作不会在 iCTRL 上重放。锁屏、无 Runner 会话时也能操作，这是纯 iCTRL 后端做不到的。
+
 ## 用一段提示词让 Codex 安装
 
 将下面这段话复制到本机 Codex：

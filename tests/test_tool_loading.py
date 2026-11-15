@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
-from iphone_use import BATCH_OPS, INSTRUCTIONS, Runtime, SCHEMAS, TOOLS, validate, validate_semantics
+from iphone_use import BATCH_OPS, HYBRID_ONLY, INSTRUCTIONS, Runtime, SCHEMAS, TOOLS, ictrl_tool_catalog, validate, validate_semantics
 from wda_client import WDAError
 
 
@@ -82,12 +82,13 @@ class ToolLoadingTests(unittest.TestCase):
         self.batch = self.catalog["pua_batch"]["inputSchema"]
 
     def test_pua_names_are_consistent_across_the_published_contract_and_guidance(self):
-        self.assertEqual(set(self.catalog), {"pua_" + name for name in SCHEMAS})
+        # The Runner catalog leaves out tools only the hybrid backend can serve.
+        self.assertEqual(set(self.catalog), {"pua_" + name for name in set(SCHEMAS) - HYBRID_ONLY})
         self.assertNotIn("wda_", json.dumps(TOOLS) + INSTRUCTIONS)
         for name, tool in self.catalog.items():
             if name != "pua_screen":
                 self.assertEqual(tool["title"], "Pua " + name[4:].replace("_", " "))
-        public_names = set(self.catalog)
+        public_names = set(self.catalog) | {tool["name"] for tool in ictrl_tool_catalog(hybrid=True)}
         for document in (ROOT / "skills").rglob("*.md"):
             body = document.read_text()
             self.assertNotRegex(body, r"(?i)\bwda\b|wda_")
@@ -95,6 +96,11 @@ class ToolLoadingTests(unittest.TestCase):
                 self.assertTrue(reference in public_names or reference in {
                     "pua_unreachable", "pua_foreground_unavailable", "pua_recovery_required"
                 }, f"{document.relative_to(ROOT)}: {reference}")
+
+    def test_hybrid_only_tools_are_published_by_the_hybrid_catalog(self):
+        published = {tool["name"] for tool in ictrl_tool_catalog(hybrid=True)}
+        self.assertEqual(published, {name for name in published} | {"pua_" + name for name in HYBRID_ONLY})
+        self.assertNotIn("pua_unlock", {tool["name"] for tool in ictrl_tool_catalog()})
 
     def test_every_published_schema_fits_before_host_compaction(self):
         for name, tool in self.catalog.items():

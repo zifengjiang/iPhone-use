@@ -19,6 +19,8 @@ import threading
 import time
 from wda_client import WDAClient, WDAError
 from ictrl_backend import IctrlClient, IctrlController, MCP_TOOLS, unsupported
+from coredevice_client import CoreDeviceClient
+from hybrid_backend import HybridController, HYBRID_MCP_TOOLS
 from wda_controller import CALL_BUDGET, PhoneController, TYPING_FREQUENCY
 from wda_setup import SetupManager, state_directory
 from wda_apps import AppCatalog
@@ -117,6 +119,8 @@ DESCRIPTIONS={
 DESCRIPTIONS["apps"]="Resolve a real bundle ID by installed-device inventory, bundled verified aliases, or Apple's Search API. Query app name before launch instead of guessing. Store metadata does not prove installation; check installed_verified and publisher/country."
 READS={"doctor","observe","find","wait","metrics","apps"}
 READS.update(("screen","screen_frame"))
+SCHEMAS["unlock"]=obj({"passcode":string("Digits of the lock-screen passcode. Omit to use IPHONE_USE_UNLOCK_PASSCODE.",max_length=32)})
+DESCRIPTIONS["unlock"]="Unlock the iPhone through CoreDevice and report the resulting lock state. Needs a USB-attached device, Developer Mode and a passcode source; iCTRL alone can only report that the phone is locked."
 DESCRIPTIONS["screen"]="Open or reuse the live iPhone screen in the Codex side panel. No phone actions or UI controls. Pause the preview before password/Face ID user takeover; resume after explicit completion. READY also opens or reuses this view by default."
 DESCRIPTIONS["screen_frame"]="App-only cached live preview and action cursor events. Never reads XML, starts sessions or occupies the phone operation lock."
 DESCRIPTIONS["screen_action"]="App-only toolbar of the live preview, pressed by the user: refresh the preview stream, send the iPhone Home, or copy a screenshot to the Mac clipboard. Refused while the preview is paused for authentication."
@@ -166,8 +170,14 @@ def published_schema(name):
     return schema
 
 
+# Unlock belongs to the hybrid backend only; publishing it to Runner-only catalogs
+# would advertise a capability those transports cannot serve.
+CATALOG_SCHEMAS={name:schema for name,schema in SCHEMAS.items() if name!="unlock"}
 TOOLS=[{"name":"pua_"+name,"title":"Pua "+name.replace("_"," "),"description":DESCRIPTIONS[name],"inputSchema":published_schema(name),
-        "annotations":{"readOnlyHint":name in READS,"destructiveHint":name not in READS,"idempotentHint":name in READS,"openWorldHint":False}} for name,schema in SCHEMAS.items()]
+        "annotations":{"readOnlyHint":name in READS,"destructiveHint":name not in READS,"idempotentHint":name in READS,"openWorldHint":False}} for name,schema in CATALOG_SCHEMAS.items()]
+HYBRID_ONLY=set(SCHEMAS)-set(CATALOG_SCHEMAS)
+UNLOCK_TOOL={"name":"pua_unlock","title":"Pua unlock","description":DESCRIPTIONS["unlock"],"inputSchema":published_schema("unlock"),
+             "annotations":{"readOnlyHint":False,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}}
 for tool in TOOLS:
     if tool["name"] in ("pua_ready","pua_screen"):
         tool["_meta"]={"ui":{"resourceUri":SCREEN_URI}}
@@ -259,16 +269,22 @@ def setting(name,default,low,high):
 class Runtime:
     def __init__(self,state_dir=None,base_url=None):
         self.backend=os.environ.get("IPHONE_USE_BACKEND","wda")
-        if self.backend not in ("wda","ictrl"):
-            raise ValueError("IPHONE_USE_BACKEND must be wda or ictrl.")
-        root=(state_dir or Path.home()/".local/share/iphone-use-ictrl") if self.backend=="ictrl" else state_directory(state_dir)
+        if self.backend not in ("wda","ictrl","hybrid"):
+            raise ValueError("IPHONE_USE_BACKEND must be wda, ictrl or hybrid.")
+        ictrl_family=self.backend in ("ictrl","hybrid")
+        root=(state_dir or Path.home()/".local/share/iphone-use-ictrl") if ictrl_family else state_directory(state_dir)
         self.state_dir=Path(root).expanduser().resolve();self.state_dir.mkdir(mode=0o700,parents=True,exist_ok=True);self.state_dir.chmod(0o700)
-        if self.backend=="ictrl":
+        if ictrl_family:
             if base_url is not None:
                 raise ValueError("The iCTRL backend discovers its endpoint; --url is for WDA.")
             self.base_url=None
             self.client=IctrlClient(os.environ.get("IPHONE_USE_ICTRL_DEVICE_ID"))
-            self.phone=IctrlController(self.client,self.state_dir)
+            if self.backend=="hybrid":
+                self.core=CoreDeviceClient(state_dir=self.state_dir)
+                self.phone=HybridController(self.client,self.core,self.state_dir)
+            else:
+                self.core=None
+                self.phone=IctrlController(self.client,self.state_dir)
             self.screen=None
         else:
             # Configuration is private runtime data, never a project file.
@@ -284,7 +300,7 @@ class Runtime:
             self.apps=AppCatalog(self.state_dir,self.setup_manager)
             self.screen=ScreenHub(self.state_dir)
             self.phone.screen=self.screen
-        self.phone.settle_seconds=0 if self.backend=="ictrl" else setting("WDA_SETTLE_SECONDS",SETTLE_SECONDS,0,2)
+        self.phone.settle_seconds=0 if ictrl_family else setting("WDA_SETTLE_SECONDS",SETTLE_SECONDS,0,2)
         self.phone.call_budget=setting("WDA_CALL_BUDGET_SECONDS",CALL_BUDGET,5,240)
         self.phone.typing_frequency=int(setting("WDA_TYPING_FREQUENCY",TYPING_FREQUENCY,5,120))
         # One entry per model-facing response: size, and the idle gap before its request.
@@ -298,8 +314,10 @@ class Runtime:
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         validate(args,SCHEMAS[name[4:]]);validate_semantics(name[4:],args)
         ictrl=getattr(self,"backend","wda")=="ictrl"
-        if ictrl:
-            if name not in MCP_TOOLS or (name=="pua_screen_action" and args["action"]!="refresh"):
+        hybrid=getattr(self,"backend","wda")=="hybrid"
+        if ictrl or hybrid:
+            allowed=MCP_TOOLS if ictrl else HYBRID_MCP_TOOLS
+            if name not in allowed or (name=="pua_screen_action" and args["action"]!="refresh"):
                 unsupported("This tool is unavailable in the iCTRL pilot.")
         elif name in ("pua_screen","pua_screen_frame","pua_screen_action"):
             self.identify_device()
@@ -484,7 +502,7 @@ class Runtime:
     def _call(self,name,args):
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         op=name[4:];validate(args,SCHEMAS[op]);validate_semantics(op,args)
-        if getattr(self,"backend","wda")=="ictrl":
+        if getattr(self,"backend","wda") in ("ictrl","hybrid"):
             if op in ("screen","screen_action"):return self.phone.screen_snapshot(args.get("action","open"))
             return self.phone.run(op,args)
         start=time.monotonic();error=None;activity=None
@@ -642,7 +660,7 @@ ICTRL_INSTRUCTIONS=(
 )
 
 
-def ictrl_tool_catalog():
+def ictrl_tool_catalog(hybrid=False):
     descriptions={
         "pua_setup":"Discover nearby iCTRL devices or report the current configuration.",
         "pua_doctor":"Report the iCTRL connection configuration and setup steps.",
@@ -656,10 +674,23 @@ def ictrl_tool_catalog():
         "pua_launch_app":"Activate an App by bundle ID through iCTRL.",
         "pua_batch":"Run a short batch of supported iCTRL operations. Stops on errors.",
     }
+    if hybrid:
+        descriptions.update({
+            "pua_ready":"Verify the paired iCTRL device, unlock it through CoreDevice when the passcode is configured, then report foreground and viewport.",
+            "pua_observe":"Read the iCTRL foreground text source plus a CoreDevice screenshot when USB is attached.",
+            "pua_tap":"Tap by iPhone point coordinates; falls back to CoreDevice HID when the Runner is unreachable.",
+            "pua_swipe":"Swipe once; falls back to CoreDevice HID when the Runner is unreachable.",
+            "pua_press_button":"Press Home, volume up or volume down through CoreDevice.",
+            "pua_type_text":"Type printable ASCII through the CoreDevice keyboard. Tap the field first; selectors and verification need WDA.",
+            "pua_unlock":"Unlock the iPhone through CoreDevice using the configured or given passcode.",
+        })
+        allowed=HYBRID_MCP_TOOLS
+    else:
+        allowed=MCP_TOOLS
     catalog=[]
     for tool in TOOLS:
         name=tool["name"]
-        if name not in MCP_TOOLS:continue
+        if name not in allowed:continue
         item=dict(tool)
         item["description"]=descriptions[name]
         if name=="pua_setup":
@@ -672,6 +703,8 @@ def ictrl_tool_catalog():
         if name=="pua_screen_action":
             item["inputSchema"]=obj({"action":string(enum=["refresh"])},("action",))
         catalog.append(item)
+    if hybrid:
+        catalog.append({**UNLOCK_TOOL,"description":descriptions["pua_unlock"]})
     return catalog
 
 
@@ -682,8 +715,8 @@ def serve(runtime):
     catalog here keeps the preview live and the host responsive while a long phone
     operation is still running. Phone tools stay strictly sequential.
     """
-    ictrl=getattr(runtime,"backend","wda")=="ictrl"
-    tools=ictrl_tool_catalog() if ictrl else TOOLS
+    ictrl=getattr(runtime,"backend","wda") in ("ictrl","hybrid")
+    tools=ictrl_tool_catalog(hybrid=getattr(runtime,"backend","wda")=="hybrid") if ictrl else TOOLS
     screen_uri=ICTRL_SCREEN_URI if ictrl else SCREEN_URI
     writing=threading.Lock()
     def send(response):

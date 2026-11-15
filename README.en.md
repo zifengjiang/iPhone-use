@@ -10,6 +10,30 @@ The plugin connects to [WebDriverAgent](https://github.com/appium/WebDriverAgent
 
 **Before using iPhone Use, install, sign, and start WDA Runner on your own iPhone.** WDA is the on-device execution service. The prompt and setup workflow below can help Codex complete the initial installation; a healthy existing WDA can be reused.
 
+## CoreDevice hybrid backend
+
+`IPHONE_USE_BACKEND=hybrid` runs iCTRL and CoreDevice side by side in one process: pictures come from CoreDevice, the text tree stays on iCTRL. Use it when a run needs a structured page and also has to work while the phone is locked.
+
+1. Give CoreDevice its own interpreter. The MCP process itself does not need `pymobiledevice3`.
+
+   ```bash
+   /opt/homebrew/bin/python3 -m venv ~/.local/share/iphone-use-coredevice/venv
+   ~/.local/share/iphone-use-coredevice/venv/bin/pip install pymobiledevice3 Pillow
+   ```
+
+2. Point both backends at the device: the full iCTRL `device_id` and the UDID from `devicectl`.
+
+   ```bash
+   export IPHONE_USE_BACKEND=hybrid
+   export IPHONE_USE_ICTRL_DEVICE_ID='<full device_id>'
+   export IPHONE_USE_COREDEVICE_UDID='00008150-0000000000000001'
+   export IPHONE_USE_UNLOCK_PASSCODE='<passcode, optional>'
+   ```
+
+3. Check it: `pua_ready` reports `backend: "hybrid"` and `coredevice: true`; `pua_unlock` types the passcode through CoreDevice gestures and returns `locked: false`; `pua_lockstate` reports the lock state, or `null` when CoreDevice cannot answer (it has no such query on iOS 27.2.1).
+
+Screenshots, coordinate taps, swipes, the Home and volume keys, typing and unlock run on CoreDevice (a warm tap takes 52 ms; the Runner needs about 1.1 s). The text tree, page elements and app launch stay on iCTRL. When the Runner drops, screenshots and coordinate actions degrade to CoreDevice and the `app` field reads `unknown`; an action that times out on CoreDevice is never replayed on iCTRL. A locked, session-less phone stays operable, which the iCTRL backend alone cannot do.
+
 ## Ask Codex to install it
 
 Paste this prompt into Codex running on your Mac:

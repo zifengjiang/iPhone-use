@@ -315,14 +315,35 @@ class PhoneController:
             fail("invalid_response", "Invalid screenshot encoding.")
         if not data.startswith(wda_image.PNG_SIGNATURE):
             fail("invalid_response","PUA screenshot is not PNG.")
-        artifacts=self.state_dir/"artifacts";artifacts.mkdir(mode=0o700,parents=True,exist_ok=True)
-        dest=artifacts/(dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")+"-"+uuid.uuid4().hex[:8]+".png")
-        dest.write_bytes(data);dest.chmod(0o600)
+        return self.store_png(data,viewport)
+
+    def store_png(self,data,viewport):
+        """Keep one native PNG as evidence and hand the model a bounded copy of it."""
+        dest=self.write_artifact(data,".png")
         native=wda_image.png_size(data[:32])
+        self.match_orientation(native,viewport)
+        path,mime,width,height=wda_image.model_image(dest)
+        return self.image_record(path,mime,width,height,viewport)
+
+    def store_jpeg(self,data,width,height,viewport,native=None):
+        """Keep an already-bounded JPEG; the encoder ran where the pixels were read."""
+        dest=self.write_artifact(data,".jpg")
+        self.match_orientation(native,viewport)
+        return self.image_record(dest,"image/jpeg",width,height,viewport)
+
+    def write_artifact(self,data,suffix):
+        artifacts=self.state_dir/"artifacts";artifacts.mkdir(mode=0o700,parents=True,exist_ok=True)
+        dest=artifacts/(dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")+"-"+uuid.uuid4().hex[:8]+suffix)
+        dest.write_bytes(data);dest.chmod(0o600)
+        return dest
+
+    def match_orientation(self,native,viewport):
         if native and (native[0]>native[1])!=(viewport["width"]>viewport["height"]):
             # The capture is turned the other way than the remembered viewport: the phone rotated.
             viewport.update(self.viewport())
-        path,mime,width,height=wda_image.model_image(dest)
+
+    def image_record(self,path,mime,width,height,viewport):
+        artifacts=path.parent
         for pattern in ("*.png","*.jpg"):
             for old in sorted(artifacts.glob(pattern))[:-100]:
                 old.unlink()
