@@ -106,7 +106,7 @@ function call(op: string, args: Json = {}): Promise<Json> {
 
 async function frame(after: number, timeout: number): Promise<Json> {
   if (sequence <= after) {
-    if (!startStream()) return { error: 'coredevice helper is not installed', sequence }
+    if (!stream && !startStream()) return { error: 'coredevice helper is not installed', sequence }
     const deadline = Date.now() + timeout
     while (sequence <= after && Date.now() < deadline) {
       await Promise.race([new Promise<void>((resolve) => waiters.push(resolve)), new Promise<void>((resolve) => setTimeout(resolve, 250))])
@@ -115,6 +115,11 @@ async function frame(after: number, timeout: number): Promise<Json> {
   if (!frames) return { sequence, waiting: true }
   return { sequence, jpeg: frames.toString('base64'), width: size.width, height: size.height }
 }
+
+process.on('exit', () => {
+  stream?.kill()
+  action?.kill()
+})
 
 export default function activate(orca: OrcaWorkerApi): void {
   void call('info').then((info) => {

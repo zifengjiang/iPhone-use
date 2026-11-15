@@ -44,10 +44,11 @@ async function loop() {
     if (reply.sequence > sequence) { sequence = reply.sequence; failures = 0 }
     if (reply.jpeg) {
       img.src = 'data:image/jpeg;base64,' + reply.jpeg
-      img.hidden = false; empty.hidden = true; dot.classList.add('live')
+      empty.hidden = true; img.hidden = false
+      empty.textContent = ''; dot.classList.add('live')
     }
     if (reply.width) { size = { width: reply.width, height: reply.height } }
-    if (reply.error) { empty.textContent = reply.error; empty.hidden = false }
+    if (reply.error && img.hidden) { empty.textContent = reply.error; empty.hidden = false }
     meta.textContent = reply.waiting ? '等待首帧…' : `Live · ${sequence} 帧`
   } catch {
     failures += 1
