@@ -404,6 +404,35 @@ class ScreenHub:
             self._frame = {"seq": self._seq, "_jpeg": raw,
                            "mimeType": "image/jpeg", "width": width, "height": height}
 
+    @staticmethod
+    def _axe_binary():
+        override = os.environ.get("IPHONE_USE_AXE")
+        if override:
+            return override if Path(override).is_file() else None
+        found = shutil.which("axe")
+        if found:
+            return found
+        bundled = Path.home() / ".local" / "share" / "iphone-use-axe" / "axe"
+        return str(bundled) if bundled.is_file() else None
+
+    @classmethod
+    def _axe_command(cls, udid, config):
+        """AXe already answers the device's own stream, so no Runner or forwarder is needed."""
+        binary = cls._axe_binary()
+        if not binary:
+            return None
+        fps = config.get("stream_fps", 10)
+        quality = config.get("stream_quality", 60)
+        scale = config.get("stream_scale", 0.5)
+        if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 30:
+            fps = 10
+        if isinstance(quality, bool) or not isinstance(quality, int) or not 1 <= quality <= 100:
+            quality = 60
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not 0.1 <= scale <= 1:
+            scale = 0.5
+        return [binary, "stream-video", "--udid", udid, "--format", "mjpeg",
+                "--fps", str(fps), "--quality", str(quality), "--scale", f"{scale:g}"]
+
     def _command(self):
         try:
             config = json.loads((self.state_dir / "config.json").read_text())
@@ -411,6 +440,12 @@ class ScreenHub:
             port = config.get("mjpeg_device_port", 9100)
             if not isinstance(udid, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,64}", udid):
                 return None
+            # AXe streams only when its CoreDevice service directory answers; otherwise the
+            # device's own MJPEG server stays the source. Opt in per install.
+            if config.get("stream_backend") == "axe":
+                axe = self._axe_command(udid, config)
+                if axe:
+                    return axe
             if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
                 return None
             node = shutil.which("node")
