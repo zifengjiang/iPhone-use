@@ -15,6 +15,7 @@ import os
 import time
 
 import wda_image
+from axe_client import TREE_LIMIT, AxeClient
 from ictrl_backend import IctrlController, SUPPORTED_ACTIONS, unsupported
 from wda_client import WDAError
 from wda_controller import VIEWPORT_TTL
@@ -36,9 +37,10 @@ class HybridController(IctrlController):
 
     backend = "hybrid"
 
-    def __init__(self, client, core, state_dir):
+    def __init__(self, client, core, state_dir, axe=None):
         super().__init__(client, state_dir)
         self.core = core
+        self.axe = axe if axe is not None else AxeClient()
         self.passcode = (os.environ.get("IPHONE_USE_UNLOCK_PASSCODE") or "").strip()
         self._point_size = None
         self._app_cache = None

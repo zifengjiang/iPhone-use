@@ -19,6 +19,7 @@ import threading
 import time
 from wda_client import WDAClient, WDAError
 from ictrl_backend import IctrlClient, IctrlController, MCP_TOOLS, unsupported
+from axe_client import AxeClient
 from coredevice_client import CoreDeviceClient
 from hybrid_backend import HybridController, HYBRID_MCP_TOOLS
 from wda_controller import CALL_BUDGET, PhoneController, TYPING_FREQUENCY
@@ -281,7 +282,8 @@ class Runtime:
             self.client=IctrlClient(os.environ.get("IPHONE_USE_ICTRL_DEVICE_ID"))
             if self.backend=="hybrid":
                 self.core=CoreDeviceClient(state_dir=self.state_dir)
-                self.phone=HybridController(self.client,self.core,self.state_dir)
+                self.axe=AxeClient()
+                self.phone=HybridController(self.client,self.core,self.state_dir,axe=self.axe)
             else:
                 self.core=None
                 self.phone=IctrlController(self.client,self.state_dir)
