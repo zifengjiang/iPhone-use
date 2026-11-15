@@ -19,6 +19,11 @@ from wda_client import WDAError
 BINARY_NAME = "axe"
 DEFAULT_INSTALL = pathlib.Path.home() / ".local" / "share" / "iphone-use-axe" / "axe"
 TREE_LIMIT = 32_768
+_MESSAGES = (("No accessibility element matches", "axe_target_not_found"),
+             ("cover this point", "axe_ambiguous_target"),
+             ("from different branches", "axe_ambiguous_target"),
+             ("moved", "axe_target_changed"),
+             ("service directory port was not found", "axe_service_unavailable"))
 _ERRORS = {"targetNotFound": "axe_target_not_found", "notBooted": "axe_target_not_found",
            "deviceLocked": "phone_locked", "busy": "axe_busy", "timeout": "axe_timeout",
            "treeUnavailable": "axe_tree_unavailable", "deviceNotConnected": "axe_disconnected",
@@ -58,7 +63,8 @@ class AxeClient:
         if done.returncode != 0:
             message = (done.stderr or done.stdout or "").strip().splitlines()
             text = message[-1] if message else f"AXe exited with {done.returncode}."
-            code = next((value for name, value in _ERRORS.items() if name in text), "axe_failed")
+            code = next((value for phrase, value in _MESSAGES if phrase in text), None) \
+                or next((value for name, value in _ERRORS.items() if name in text), "axe_failed")
             raise WDAError(code, text[:300], uncertain=code not in ("axe_target_not_found", "axe_not_paired"))
         return done.stdout
 
@@ -72,14 +78,22 @@ class AxeClient:
         except json.JSONDecodeError as error:
             raise WDAError("axe_failed", f"AXe returned unreadable JSON: {text[:120]}") from error
 
-    def tap(self, udid, identifier=None, label=None, value=None, timeout=None):
+    def tap(self, udid, identifier=None, label=None, value=None, element_type=None, timeout=None):
         args = ["tap", "--udid", udid]
-        for flag, item in (("--id", identifier), ("--label", label), ("--value", value)):
+        for flag, item in (("--id", identifier), ("--label", label), ("--value", value),
+                           ("--element-type", element_type)):
             if item:
                 args += [flag, item]
         if timeout:
             args += ["--wait-timeout", f"{timeout:g}"]
-        self._run(*args)
+        try:
+            self._run(*args)
+        except WDAError as error:
+            # Overlapping windows make AXe refuse; narrowing by type often resolves it.
+            if error.code != "axe_ambiguous_target" or not element_type:
+                raise
+            args += ["--element-type", element_type]
+            self._run(*args)
 
     def tree_text(self, udid, limit=TREE_LIMIT):
         """Render the tree as indented text so it reads like the Runner's source."""

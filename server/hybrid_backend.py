@@ -12,6 +12,7 @@ needs CoreDevice outright: iCTRL can only report that the phone is locked.
 """
 import base64
 import os
+import re
 import time
 
 import wda_image
@@ -70,8 +71,14 @@ class HybridController(IctrlController):
         try:
             viewport = super().viewport(VIEWPORT_TTL)
         except WDAError as error:
-            if error.code not in _RUNNER_DOWN:
+            if error.code not in _RUNNER_DOWN | {"ictrl_device_required", "ictrl_device_ambiguous"} \
+                    or not self.core.available():
                 raise
+            info = self.core.call("info")
+            size = (info.get("point_width") or 0, info.get("point_height") or 0)
+            if all(size):
+                self._point_size = size
+                return self._point_size
             raise WDAError("coredevice_unavailable", "The viewport is unknown: the Runner is gone and CoreDevice "
                                                      "did not report a display size.") from error
         self._point_size = (viewport["width"], viewport["height"])
@@ -220,6 +227,92 @@ class HybridController(IctrlController):
             return {"launched": args["bundle_id"], "backend": "coredevice"}
         unsupported("This operation has no CoreDevice equivalent.")
 
+    @staticmethod
+    def axe_nodes(nodes):
+        """Flatten the AXe tree, tolerant of a wrapper object instead of a list."""
+        root = nodes if isinstance(nodes, list) else [nodes]
+        flat = []
+        stack = list(reversed(root))
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            flat.append(node)
+            stack.extend(reversed([child for child in node.get("children") or [] if isinstance(child, dict)]))
+        return flat
+
+    @staticmethod
+    def frame_center(frame):
+        numbers = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", str(frame or ""))]
+        if len(numbers) < 4:
+            return None
+        x, y, width, height = numbers[:4]
+        return round(x + width / 2, 1), round(y + height / 2, 1)
+
+    def axe_matches(self, simple):
+        matches = []
+        for node in self.axe_nodes(self.axe.describe_ui(self.core.udid)):
+            if simple.get("label") and node.get("AXLabel") != simple["label"]:
+                continue
+            if simple.get("name") and node.get("AXUniqueId") != simple["name"]:
+                continue
+            if simple.get("value") and node.get("AXValue") != simple["value"]:
+                continue
+            if simple.get("type") and str(node.get("role") or "").removeprefix("AX") != simple["type"]:
+                continue
+            matches.append(node)
+        return matches
+
+    @staticmethod
+    def axe_selector(selector):
+        """Translate the simple selector forms AXe can resolve on the device."""
+        selector = selector or {}
+        simple = {key: selector[key] for key in ("label", "name", "value", "type") if selector.get(key)}
+        if not simple or set(selector) - set(simple) - {"index", "enabled"}:
+            unsupported("AXe resolves label, name (accessibility identifier), value and type; use coordinates for "
+                        "label_contains, predicates, index and enabled filters.")
+        if selector.get("enabled") is not None and str(selector["enabled"]).lower() not in ("true", "1"):
+            unsupported("AXe does not filter disabled elements; read the tree and pick an enabled one.")
+        return simple
+
+    def tap(self, selector=None, x=None, y=None, observation_id=None, expect=None, observe="none"):
+        """A selector goes to AXe, which refuses a target that moved or got covered."""
+        if selector is None:
+            return super().tap(x=x, y=y, observation_id=observation_id, expect=expect, observe=observe)
+        if expect:
+            unsupported("Postconditions need WDA; observe after the action instead.")
+        if not self.axe.available():
+            raise WDAError("axe_unavailable", "A selector tap needs AXe; install it or pass x/y from a fresh screenshot.")
+        simple = self.axe_selector(selector)
+        self.ensure_unlocked()
+        started = time.monotonic()
+        channel = "axe"
+        try:
+            self.axe.tap(self.core.udid, identifier=simple.get("name"), label=simple.get("label"),
+                         value=simple.get("value"), element_type=simple.get("type"))
+        except WDAError as error:
+            # Overlapping accessibility branches make AXe refuse a selector that resolves
+            # to one element. Read the tree, keep a unique match and tap its centre.
+            if error.code != "axe_ambiguous_target":
+                raise
+            matches = self.axe_matches(simple)
+            points = [(node, self.frame_center(node.get("AXFrame"))) for node in matches]
+            points = [(node, point) for node, point in points if point]
+            if len(points) != 1:
+                raise WDAError("ambiguous_target",
+                               f"{len(points)} elements match this selector; add type or value, "
+                               "or tap a point from the tree.",
+                               details={"candidates": [{"label": node.get("AXLabel"),
+                                                        "name": node.get("AXUniqueId"),
+                                                        "type": node.get("role"), "point": point}
+                                                       for node, point in points[:8]]}) from error
+            point = points[0][1]
+            self.fallback("tap", {"x": point[0], "y": point[1]})
+            channel = "axe+hid"
+        result = self.after(observe=observe)
+        return {"tapped": {"selector": simple}, "backend": channel,
+                "duration_ms": round((time.monotonic() - started) * 1000), **result}
+
     def run(self, op, args):
         if op == "ready":
             result = super().run(op, args)
@@ -265,10 +358,12 @@ class HybridController(IctrlController):
     @staticmethod
     def check_operation(op, args):
         if op not in SUPPORTED_ACTIONS | {"observe", "type_text"}:
-            unsupported("The hybrid backend supports observation, coordinate taps, swipes, Home and volume buttons, "
-                        "app launch, type text, unlock and lockstate.")
-        if args.get("selector") is not None or args.get("expect") is not None:
-            unsupported("Use a coordinate tap from a fresh screenshot. Selectors and postconditions need WDA.")
+            unsupported("The hybrid backend supports observation, taps by selector or coordinate, swipes, Home and "
+                        "volume buttons, app launch, type text, unlock and lockstate.")
+        if args.get("selector") is not None and op != "tap":
+            unsupported("Selectors are available for taps only; read the tree and use coordinates elsewhere.")
+        if args.get("expect") is not None:
+            unsupported("Postconditions need WDA; observe after the action instead.")
         if op == "swipe" and args.get("verify"):
             unsupported("Use observe after the swipe. Tree-based swipe verification needs WDA.")
         if args.get("include_invisible") or args.get("expensive_visibility"):

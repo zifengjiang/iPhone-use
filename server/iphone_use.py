@@ -688,7 +688,7 @@ def ictrl_tool_catalog(hybrid=False):
         descriptions.update({
             "pua_ready":"Verify the paired iCTRL device, unlock it through CoreDevice when the passcode is configured, then report foreground and viewport.",
             "pua_observe":"Read the iCTRL foreground text source plus a CoreDevice screenshot when USB is attached.",
-            "pua_tap":"Tap by iPhone point coordinates; falls back to CoreDevice HID when the Runner is unreachable.",
+            "pua_tap":"Tap an element by selector (label, name, value, type) or by iPhone point coordinates. Selector taps use AXe, which refuses a target that moved or got covered.",
             "pua_swipe":"Swipe once; falls back to CoreDevice HID when the Runner is unreachable.",
             "pua_press_button":"Press Home, volume up or volume down through CoreDevice.",
             "pua_type_text":"Type printable ASCII through the CoreDevice keyboard. Tap the field first; selectors and verification need WDA.",
